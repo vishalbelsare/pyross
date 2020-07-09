@@ -3678,64 +3678,64 @@ cdef class Spp(SIR_type):
         return time_series
 
 
-    def dfullinvcovdp(self, x0, t1, t2, Nf):
-        """ calculates the derivatives of full inv_cov. Relies on derivatives of the elements created by dinvcovelemd() """
-        M=self.M
-        num_of_infection_terms=self.infection_terms.shape[0]
-        fi=self.fi
-        parameters=self.parameters
-        param_values = self.parameters.ravel()
-        l = np.zeros((num_of_infection_terms,M), dtype=DTYPE)
-        keys = np.ones((parameters.shape[0], parameters.shape[1]), dtype=int) ## all epi-params
-
-        self.lambdify_derivative_functions(keys)
-        no_inferred_params = np.sum(keys)
-        self.CM=C(0)
-        CM_f = self.CM.ravel()
-        xd = self.integrate(x0, t1, t2, steps)
-        time_points=np.linspace(t1,t2,steps)
-        dt = time_points[1]-time_points[0]
-        Nf = steps
-        full_cov_inv=[[[None]*(Nf-1) for i in range(Nf-1)] for j in range(no_inferred_params)]
-
-        dxidp = self.dmudp(x0, t1, time_points[0], steps, C, full_output=True)
-
-        for i, ti in enumerate(time_points[:steps-1]):
-            tf = time_points[i]+dt # make general
-            xi = xd[i]
-            xf = xd[i+1]
-
-            self.fill_lambdas(xi, l)
-            self.noise_correlation(xi, l)
-            Bmat = self.convert_vec_to_mat(self.B_vec)
-            Binv_i = np.linalg.inv(Bmat).ravel()
-            self.fill_lambdas(xf, l)
-            self.noise_correlation(xf, l)
-            Bmat = self.convert_vec_to_mat(self.B_vec)
-            Binv_f = np.linalg.inv(Bmat).ravel()
-
-            (ddiagdp, doffdiagdp), (ddiagdxi, doffdiagdxi) , (ddiagdxf, doffdiagdxf) = self.dinvcov_e(param_values, CM_f, fi, xi, xf, Binv_i, Binv_f)
-            #dxidp = self.dmudp(x0, t1, ti, steps, C, full_output=True)
-            dxfdp = self.dmudp(x0, t1, tf, steps,)
-            ## use chain rule to update
-            ddiagdp += np.einsum('ijk, li->ljk', ddiagdxi, dxidp)
-            ddiagdp += np.einsum('ijk, li->ljk', ddiagdxf, dxfdp)
-            doffdiagdp += np.einsum('ijk, li->ljk', doffdiagdxi, dxidp)
-            doffdiagdp += np.einsum('ijk, li->ljk', doffdiagdxf, dxfdp)
-            for k in range(no_inferred_params): ## num params
-                full_cov_inv[k][i][i]   = ddiagdp[k]
-                if i<Nf-2:
-                    full_cov_inv[k][i][i+1] = doffdiagdp[k]
-                    full_cov_inv[k][i+1][i] = np.transpose(doffdiagdp[k])
-            dxidp = dxfdp.copy()
-
-        ## Make block mat into full mat. np.sparse.bmat doesn't handle slices very well hence the workaround
-        full_cov_inv_mat = np.empty((1, (Nf-1)*self.dim, (Nf-1)*self.dim))
-        for k in range(no_inferred_params):
-            f=sparse.bmat(full_cov_inv[k], format='csc').todense().copy()
-            f = np.array(f).reshape((1,)+f.shape)
-            full_cov_inv_mat = np.concatenate((full_cov_inv_mat, f), axis=0)
-        return full_cov_inv_mat[1:]
+    # def dfullinvcovdp(self, x0, t1, t2, Nf):
+    #     """ calculates the derivatives of full inv_cov. Relies on derivatives of the elements created by dinvcovelemd() """
+    #     M=self.M
+    #     num_of_infection_terms=self.infection_terms.shape[0]
+    #     fi=self.fi
+    #     parameters=self.parameters
+    #     param_values = self.parameters.ravel()
+    #     l = np.zeros((num_of_infection_terms,M), dtype=DTYPE)
+    #     keys = np.ones((parameters.shape[0], parameters.shape[1]), dtype=int) ## all epi-params
+    #
+    #     self.lambdify_derivative_functions(keys)
+    #     no_inferred_params = np.sum(keys)
+    #     xd = self.integrate(x0, t1, t2, steps)
+    #     time_points=np.linspace(t1,t2,steps)
+    #     dt = time_points[1]-time_points[0]
+    #     Nf = steps
+    #     full_cov_inv=[[[None]*(Nf-1) for i in range(Nf-1)] for j in range(no_inferred_params)]
+    #
+    #     dxidp = self.dmudp(x0, t1, time_points[0], steps)
+    #
+    #     for i, ti in enumerate(time_points[:steps-1]):
+    #         tf = time_points[i]+dt # make general
+    #         xi = xd[i]
+    #         xf = xd[i+1]
+    #
+    #         CM_f = self.contactMatrix(tf).ravel()
+    #
+    #         self.fill_lambdas(xi, l)
+    #         self.noise_correlation(xi, l)
+    #         Bmat = self.convert_vec_to_mat(self.B_vec)
+    #         Binv_i = np.linalg.inv(Bmat).ravel()
+    #         self.fill_lambdas(xf, l)
+    #         self.noise_correlation(xf, l)
+    #         Bmat = self.convert_vec_to_mat(self.B_vec)
+    #         Binv_f = np.linalg.inv(Bmat).ravel()
+    #
+    #         (ddiagdp, doffdiagdp), (ddiagdxi, doffdiagdxi) , (ddiagdxf, doffdiagdxf) = self.dinvcov_e(param_values, CM_f, fi, xi, xf, Binv_i, Binv_f)
+    #         #dxidp = self.dmudp(x0, t1, ti, steps, C, full_output=True)
+    #         dxfdp = self.dmudp(x0, t1, tf, steps)
+    #         ## use chain rule to update
+    #         ddiagdp += np.einsum('ijk, li->ljk', ddiagdxi, dxidp)
+    #         ddiagdp += np.einsum('ijk, li->ljk', ddiagdxf, dxfdp)
+    #         doffdiagdp += np.einsum('ijk, li->ljk', doffdiagdxi, dxidp)
+    #         doffdiagdp += np.einsum('ijk, li->ljk', doffdiagdxf, dxfdp)
+    #         for k in range(no_inferred_params): ## num params
+    #             full_cov_inv[k][i][i]   = ddiagdp[k]
+    #             if i<Nf-2:
+    #                 full_cov_inv[k][i][i+1] = doffdiagdp[k]
+    #                 full_cov_inv[k][i+1][i] = np.transpose(doffdiagdp[k])
+    #         dxidp = dxfdp.copy()
+    # 
+    #     ## Make block mat into full mat. np.sparse.bmat doesn't handle slices very well hence the workaround
+    #     full_cov_inv_mat = np.empty((1, (Nf-1)*self.dim, (Nf-1)*self.dim))
+    #     for k in range(no_inferred_params):
+    #         f=sparse.bmat(full_cov_inv[k], format='csc').todense().copy()
+    #         f = np.array(f).reshape((1,)+f.shape)
+    #         full_cov_inv_mat = np.concatenate((full_cov_inv_mat, f), axis=0)
+    #     return full_cov_inv_mat[1:]
 
 
     def construct_l(self, x):
