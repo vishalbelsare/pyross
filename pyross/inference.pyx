@@ -1,11 +1,10 @@
 from itertools import compress
 from scipy import sparse
-from scipy.integrate import solve_ivp, quad
+from scipy.integrate import solve_ivp
 from scipy.optimize import minimize, approx_fprime
 from scipy.stats import lognorm
 from scipy.linalg import solve_triangular
 import numpy as np
-from scipy.interpolate import make_interp_spline
 from scipy.linalg import eig
 cimport numpy as np
 cimport cython
@@ -36,7 +35,7 @@ except ImportError:
 
 import pyross.deterministic
 cimport pyross.deterministic
-import pyross.contactMatrix
+import pyross.contactMatrix, pyross.utils
 from pyross.utils_python import minimization, nested_sampling
 from libc.math cimport sqrt, log, INFINITY
 cdef double PI = 3.14159265359
@@ -1843,14 +1842,15 @@ cdef class SIR_type:
                                                         is_scale_parameter,
                                                          scaled_param_guesses)
         kwargs = {k:orig_params[i] for (i, k) in enumerate(param_keys)}
-        x0 = self._construct_inits(inits, init_flags, init_fltrs,
-                                    obs0, fltr[0])
-        penalty = self._penalty_from_negative_values(x0)
-        x0[x0<0] = 0.1/self.Omega # set to be small and positive
         if intervention_fun is None:
             self.contactMatrix = generator.constant_contactMatrix(**kwargs)
         else:
             self.contactMatrix = generator.intervention_custom_temporal(intervention_fun, **kwargs)
+
+        x0 = self._construct_inits(inits, init_flags, init_fltrs,
+                                    obs0, fltr[0])
+        penalty = self._penalty_from_negative_values(x0)
+        x0[x0<0] = 0.1/self.Omega # set to be small and positive
 
         minus_logp = self._obtain_logp_for_lat_traj(x0, obs, fltr[1:], Tf, tangent=tangent)
         minus_logp -= np.sum(lognorm.logpdf(params, s, scale=scale))
@@ -3381,6 +3381,7 @@ cdef class Spp(SIR_type):
         readonly np.ndarray parameters
         readonly pyross.deterministic.Spp det_model
         readonly dict model_spec
+        readonly object dA, dB, dJ, dinvcov_e
 
 
     def __init__(self, model_spec, parameters, M, fi, Omega=1, steps=4,
@@ -3395,6 +3396,10 @@ cdef class Spp(SIR_type):
         self.infection_terms = res[4]
         super().__init__(parameters, self.nClass, M, fi, Omega, steps, det_method, lyapunov_method)
         self.det_model = pyross.deterministic.Spp(model_spec, parameters, M, fi*Omega)
+        self.dA = None
+        self.dB = None
+        self.dJ = None
+        self.dinvcov_e = None
 
     def infection_indices(self):
         cdef Py_ssize_t a = 100
@@ -3571,24 +3576,22 @@ cdef class Spp(SIR_type):
             unique_str = ''.join(["'%s':'%s';"%(key, val) for (key, val) in sorted(spec.items())])
             return hashlib.sha1(unique_str.encode()).hexdigest()
 
-        try:
-            dA, dB, dJ, dinvcov_e
+        if self.dA is not None:
             return
-        except NameError:
+        else:
             print("Looking for saved functions...")
 
         try:
             spec_ID=dict_id(self.model_spec)
-            global dA, dB, dJ, dinvcov_e
             dill.settings['recurse']=True
             with open(f"dA_{spec_ID}.bin", "rb") as file_dA:
-                dA = dill.load(file_dA)
+                self.dA = dill.load(file_dA)
             with open(f"dB_{spec_ID}.bin", "rb") as file_dB:
-                dB = dill.load(file_dB)
+                self.dB = dill.load(file_dB)
             with open(f"dJ_{spec_ID}.bin", "rb") as file_dJ:
-                dJ = dill.load(file_dJ)
+                self.dJ = dill.load(file_dJ)
             with open(f"dinvcov_{spec_ID}.bin", "rb") as file_dc:
-                dinvcov_e = dill.load(file_dc)
+                self.dinvcov_e = dill.load(file_dc)
             print("Loaded.")
         except FileNotFoundError:
             print("None found. Creating python functions from sympy expressions (this might take a while)...")
@@ -3608,74 +3611,74 @@ cdef class Spp(SIR_type):
             expr_var_list = [p, CM, fi, x]
             expr_var_list_ext = [p, CM, fi, xi, xf, Binv_i, Binv_f]
 
-            global dA, dB, dJ, dinvcov_e
-            dA = sympy.lambdify(expr_var_list, self.dAd(p, keys=keys))
-            dB = sympy.lambdify(expr_var_list, self.dBd(p, keys=keys))
-            dJ = sympy.lambdify(expr_var_list, self.dJd(p, keys=keys))
-            dinvcov_e = sympy.lambdify(expr_var_list_ext, self.dinvcovelemd(p, keys=keys) )
+
+            self.dA = sympy.lambdify(expr_var_list, self.dAd(p, keys=keys))
+            self.dB = sympy.lambdify(expr_var_list, self.dBd(p, keys=keys))
+            self.dJ = sympy.lambdify(expr_var_list, self.dJd(p, keys=keys))
+            self.dinvcov_e = sympy.lambdify(expr_var_list_ext, self.dinvcovelemd(p, keys=keys) )
             print("Functions created. They will be saved for future function calls")
             dill.settings['recurse']=True
-            dill.dump(dA, open(f"dA_{spec_ID}.bin", "wb"))
-            dill.dump(dB, open(f"dB_{spec_ID}.bin", "wb"))
-            dill.dump(dJ, open(f"dJ_{spec_ID}.bin", "wb"))
-            dill.dump(dinvcov_e, open(f"dinvcov_{spec_ID}.bin", "wb"))
+            dill.dump(self.dA, open(f"dA_{spec_ID}.bin", "wb"))
+            dill.dump(self.dB, open(f"dB_{spec_ID}.bin", "wb"))
+            dill.dump(self.dJ, open(f"dJ_{spec_ID}.bin", "wb"))
+            dill.dump(self.dinvcov_e, open(f"dinvcov_{spec_ID}.bin", "wb"))
 
-    def _obtain_full_time_evol_op(sol, t1, t2, Nf):
+    def _obtain_full_backward_time_evol_op(self, sol, t1, t2):
         '''
-        Returns time evolution operators U(t, t2) as a dense output object
+        Returns time evolution operators U(t, t2).T as a dense output object
         '''
-        # do backward time integration and return a dense output object
+        def rhs(t, U_vec):
+            xt = sol(t)/self.Omega
+            self.compute_jacobian_and_b_matrix(xt, t, b_matrix=False, jacobian=True)
+            U_mat = np.reshape(U_vec, (self.dim, self.dim))
+            dUdt = - np.dot(self.J_mat.T, U_mat) #
+            return np.ravel(dUdt)
 
+        U0 = np.identity((self.dim)).flatten()
+        res = solve_ivp(rhs, (t2, t1), U0, method=self.det_method, dense_output=True)
+        return res.sol
 
-    def dmudp(self, x0, t1, tf, steps, C, full_output=False):
+    def dmudp(self, x0, t1, t2, Nf, rtol=1e-4):
         """
-        calculates the derivatives of the mean traj x with respect to epi params and initial conditions.
-        Note that although we can calculate the evolution operator T via adjoint gradient ODES it
-        is comparable accuracy to finite difference anyway, and far slower.
+        calculates the derivatives of the mean traj x with respect to epi params.
         """
-
-        def integrand(t, dummy, n, tf, sol):
-            xt = spline_x(t)
-            self._obtain_time_evol_op_2(sol, t, tf) ## NOTE:possibly replace with spline
-            dAdp, _ = dA(param_values, CM_f, fi, xt.ravel())
-            dAdp = np.array(dAdp)
-            res=np.einsum('ik,jk->ji', self.U, dAdp)
-            return res[:,n]
 
         fi=self.fi
-        parameters=self.parameters
-        param_values = self.parameters.ravel()
+        param_values = np.ravel(self.parameters)
 
-        keys = np.ones((parameters.shape[0], parameters.shape[1]), dtype=int) ## default to all params
+        keys = np.ones((self.parameters.shape[0], self.parameters.shape[1]), dtype=int) ## default to all params
         self.lambdify_derivative_functions(keys)
         no_inferred_params = np.sum(keys)
-        CM_f=self.CM.ravel()
-        if isclose(ti, tf):
-            return np.zeros((no_inferred_params, self.dim)) ## ivp degen case
 
-        xd, sol = self.integrate(x0, t1, tf, steps, dense_output=True
+        _, x_sol = self.integrate(x0, t1, t2, Nf, dense_output=True)
 
-        def integrand(t, y):
-            xt = sol(t)
-            self._obtain_time_evol_op_2(sol, t, tf) ## NOTE:possibly replace with spline
-            dAdp, _ = dA(param_values, CM_f, fi, xt)
-            dAdp = np.array(dAdp)
-            res=np.einsum('ik,jk->ji', self.U, dAdp)
-            return res[:,n]
+        def integrand(t):
+            n = np.size(t)
+            f = np.empty((self.dim, no_inferred_params, n), dtype=DTYPE)
+            for i in range(n):
+                x = x_sol(t[i])/self.Omega
+                U =  U_sol(t[i]).reshape((self.dim, self.dim))
+                CM_f = np.ravel(self.contactMatrix(t[i]))
+                dAdp, _ = self.dA(param_values, CM_f, fi, x)
+                f[:, :, i] = np.einsum('ji,kj->ik', U, dAdp) # transpose U
+            return f
 
-        dmudp = np.zeros((no_inferred_params, self.dim), dtype=DTYPE)
-        for k in range(self.dim):
-            res = solve_ivp(integrand, [t1,tf], np.zeros(no_inferred_params), method='DOP853', t_eval=np.array([tf]),max_step=steps)
-            dmudp[:,k] = res.y.T[0]
+        fshape = (self.dim, no_inferred_params)
+        time_series = np.empty((Nf-1, *fshape), dtype=DTYPE)
+        time_points = np.linspace(t1, t2, Nf)
+        val = np.zeros(fshape, dtype=DTYPE)
+        for i in range(Nf-1):
+            ti = time_points[i]
+            tf = time_points[i+1]
+            U_sol = self._obtain_full_backward_time_evol_op(x_sol, ti, tf)
+            U = U_sol(ti).reshape((self.dim, self.dim)).T
+            val = np.dot(U, val)
+            time_series[i] = np.add(val, pyross.utils.quadrature(integrand, ti, tf, fshape, rtol=rtol))
+            val = time_series[i]
+        return time_series
 
-        if full_output==False:
-            T=self._obtain_time_evol_op_2(x0, xf, t1, tf)
-            dmu  = np.concatenate((dmudp, np.transpose(T)), axis=0)
-            return dmu
-        else:
-            return dmudp
 
-    def dfullinvcovdp(self, x0, t1, t2, steps, C):
+    def dfullinvcovdp(self, x0, t1, t2, Nf):
         """ calculates the derivatives of full inv_cov. Relies on derivatives of the elements created by dinvcovelemd() """
         M=self.M
         num_of_infection_terms=self.infection_terms.shape[0]
@@ -3711,9 +3714,9 @@ cdef class Spp(SIR_type):
             Bmat = self.convert_vec_to_mat(self.B_vec)
             Binv_f = np.linalg.inv(Bmat).ravel()
 
-            (ddiagdp, doffdiagdp), (ddiagdxi, doffdiagdxi) , (ddiagdxf, doffdiagdxf) = dinvcov_e(param_values, CM_f, fi, xi, xf, Binv_i, Binv_f)
+            (ddiagdp, doffdiagdp), (ddiagdxi, doffdiagdxi) , (ddiagdxf, doffdiagdxf) = self.dinvcov_e(param_values, CM_f, fi, xi, xf, Binv_i, Binv_f)
             #dxidp = self.dmudp(x0, t1, ti, steps, C, full_output=True)
-            dxfdp = self.dmudp(x0, t1, tf, steps, C, full_output=True)
+            dxfdp = self.dmudp(x0, t1, tf, steps,)
             ## use chain rule to update
             ddiagdp += np.einsum('ijk, li->ljk', ddiagdxi, dxidp)
             ddiagdp += np.einsum('ijk, li->ljk', ddiagdxf, dxfdp)
@@ -3877,18 +3880,6 @@ cdef class Spp(SIR_type):
                     J[product_index, m, reagent_index, m] += rate[m]
         J=J.reshape(self.dim, self.dim)
         return J
-
-    def construct_fullcov_elem(self, xi, xf, dt=1): ##
-        """Creates a sympy version of full cov. Takes symbol and symbolic matrices"""
-        xi = xi.reshape(1,self.dim)
-        xf = xf.reshape(1,self.dim)
-
-        Bi = sympy.Matrix(self.construct_B_spp(xi))
-        Bf = sympy.Matrix(self.construct_B_spp(xf))
-        Uf = sympy.eye(self.dim) + dt * self.construct_J_spp(xf) ## tangent space approx
-        elem_diag = Inverse(Bi) + Uf.T*Inverse(Bf)*Uf
-        elem_offdiag = -Uf.T*Inverse(Bf)
-        return elem_diag, elem_offdiag
 
     def dinvcovelemd(self, p, return_x0_deriv=False, keys=None, dt=1): ##
         """ Constuction of invcov elements in symbolic form. The inverses of B are slow, but calculating full cov elements directly is faster"""

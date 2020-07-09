@@ -4,12 +4,15 @@ import scipy.linalg
 cimport numpy as np
 cimport cython
 from libc.math cimport sqrt, pow, log, sin, cos, atan2, sqrt
+from math import isclose
 from cython.parallel import prange
 cdef double PI = 3.1415926535
 from scipy.sparse import spdiags
 from scipy.sparse.linalg.eigen.arpack import eigs, ArpackNoConvergence
 from scipy.misc import derivative
+from scipy.integrate import fixed_quad
 import matplotlib.pyplot as plt
+import warnings
 
 
 
@@ -210,6 +213,32 @@ cpdef RK2_integration(f, double [:] x, double t1, double t2, Py_ssize_t steps):
         for j in range(size):
             sol[i, j] = sol[i-1, j] + 0.5*(k1[j] + dt*fx[j])
     return sol
+
+cpdef quadrature(func, double a, double b, fshape, tol=1.49e-8, rtol=1.49e-8,
+                 maxiter=64, miniter=2):
+    '''
+    Similar to scipy's quadrature function but deals with vector functions
+    '''
+    cdef:
+        Py_ssize_t n
+        double err=np.inf, max_tol=0
+    if isclose(a, b):
+        val=np.zeros(fshape, dtype=DTYPE)
+    else:
+        val=np.empty(fshape, dtype=DTYPE)
+        newval=np.empty(fshape, dtype=DTYPE)
+        maxiter = max(miniter+1, maxiter)
+        n = miniter
+        while n < maxiter+1 and err > max_tol:
+           newval = fixed_quad(func, a, b, n=n)[0]
+           err = np.linalg.norm(np.subtract(newval, val))
+           val = newval
+           max_tol = max(tol, rtol*np.linalg.norm(val))
+           n *= 2
+        if err > max_tol:
+            warnings.warn("maxiter (%d) exceeded. Error = %e" % (maxiter, err))
+    return val
+
 
 cpdef nearest_positive_definite(double [:, :] A):
     """Find the nearest positive-definite matrix to input
