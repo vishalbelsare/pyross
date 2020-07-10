@@ -1,0 +1,7 @@
+#!/bin/bash
+
+SCRIPTDIR=$(dirname "$0")
+
+mkdir -p log
+
+python3 "$SCRIPTDIR"/run-pyross.py "$@" 2>&1 
