@@ -1,6 +1,8 @@
 cython
 numpy
-scipy 
+scipy
+sympy 
+xlrd 
 nlopt
 pathos
 cma
@@ -9,3 +11,4 @@ ipython
 jupyter
 nbconvert
 pandas
+nestle

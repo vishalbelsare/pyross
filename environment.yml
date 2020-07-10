@@ -2,18 +2,22 @@ name: pyross
 channels:
   - conda-forge
 dependencies:
-  - python=3.7
+  - python
   - cython
   - numpy
   - matplotlib
   - jupyter
-  - scipy 
+  - scipy
   - nlopt
   - pathos
   - pip
+  - pytest 
+  - pytest-cov
   - pandas
+  - sympy
   - ipython
   - nbconvert
+  - xlrd
   - pip:
     - cma
-    - pyross
+    - git+https://github.com/kbarbary/nestle.git

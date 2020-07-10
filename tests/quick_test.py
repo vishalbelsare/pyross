@@ -12,7 +12,7 @@ import inspect
 import numpy as np
 import scipy as sp
 
-skip = ["Spp", "SEAIRQ_testing", "SIR_type"]
+skip = ["Spp", "SppQ", "SEAIRQ_testing", "SIR_type", "Symbol"]
 
 class DeterministicTest(unittest.TestCase):
     """testing deterministic.pyx."""
@@ -106,7 +106,7 @@ class DeterministicTest(unittest.TestCase):
                 if i != j:
                     diff = (paths[i]-paths[j])/self.N
                     self.assertTrue((np.asarray(diff) < 0.001).all(),
-                                    msg=f"path {i} not equal to path {j}")
+                                    "path {i} not equal to path {j}")
 
     def test_SIRS(self):
         """Test to make sure SIRS collapses down to SIR"""
@@ -208,7 +208,7 @@ class StochasticTest(unittest.TestCase):
                 absdiff = np.abs(traj_mean -mean)/(N*self.Tf)
                 # print(name, np.sum(absdiff[:,:-1]))
                 self.assertTrue(np.sum(absdiff[:,:-1])<0.01,
-                                msg=f"{name} model disagreement")
+                                "{name} model disagreement")
 
     def test_stochastic_mean_tau(self):
         """Runs stochastic models a few times and compares mean to
@@ -235,7 +235,7 @@ class StochasticTest(unittest.TestCase):
                 absdiff = np.abs(traj_mean -mean)/(N*self.Tf)
                 # print(name, np.sum(absdiff[:,:-1]))
                 self.assertTrue(np.sum(absdiff[:,:-1])<0.01,
-                                msg=f"{name} model disagreement")
+                                "{name} model disagreement")
 
     def test_stochastic_integrators(self):
         """Compare tau leaping to Gillespie.
@@ -263,7 +263,7 @@ class StochasticTest(unittest.TestCase):
                 taumean= np.sum(tautraj, axis=0)
                 absdiff = np.abs(gmean - taumean)/(N*self.Tf)
                 # print(name, np.sum(absdiff), np.shape(gmean), np.shape(taumean))
-                self.assertTrue(np.sum(absdiff)<.1, msg=f"{name} model disagreement")
+                self.assertTrue(np.sum(absdiff)<.1, "{name} model disagreement")
 
 
 class ControlTest(unittest.TestCase):
@@ -347,11 +347,11 @@ class UtilsPythonTest(unittest.TestCase):
         guess = np.array([1.0, 1.0])
         bounds = np.array([[-2.0, 2.0], [-2.0, 2.0]])
         x, y = pyross.utils_python.minimization(f1, guess, bounds, enable_global=True, enable_local=False,
-                                                ftol=1e-4, cma_random_seed=1, verbose=False)
+                                                ftol=1e-5, global_atol=1e-3, cma_random_seed=1, verbose=False)
         self.assertTrue(np.abs(y - 1.0) < 1e-3)
 
         x, y = pyross.utils_python.minimization(f2, guess, bounds, enable_global=True, enable_local=False,
-                                                ftol=1e-4, verbose=False, cma_random_seed=2)
+                                                ftol=1e-5, global_atol=1e-3, verbose=False, cma_random_seed=2)
         self.assertTrue(np.abs(y - 1.0) < 1e-3)
 
         # Test local optimisation
@@ -363,7 +363,7 @@ class UtilsPythonTest(unittest.TestCase):
 
         # And now combined
         x, y = pyross.utils_python.minimization(f2, guess, bounds, enable_global=True, enable_local=True,
-                                        ftol=1e-5, global_ftol_factor=100, verbose=False, cma_random_seed=4)
+                                        ftol=1e-5, global_atol=1e-3, verbose=False, cma_random_seed=4)
         self.assertTrue(np.abs(y - 1.0) < 1e-4)
 
 

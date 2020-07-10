@@ -1,0 +1,12 @@
+name: pyross
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - cython
+  - numpy
+  - matplotlib
+  - pip
+  - pip:
+    - pyross
+

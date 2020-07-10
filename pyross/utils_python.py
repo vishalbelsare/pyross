@@ -12,8 +12,14 @@ try:
 except ImportError:
     pathos_mp = None
 
+try:
+    # Optional support for nested sampling.
+    import nestle
+except ImportError:
+    nestle = None
 
-def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_iter=100, ftol=1e-2, global_ftol_factor=10.,
+def minimization(objective_fct, guess, bounds, global_max_iter=100,
+                local_max_iter=100, ftol=1e-2, global_atol=1,
                  enable_global=True, enable_local=True, cma_processes=0, cma_population=16, cma_stds=None,
                  cma_random_seed=None, verbose=True, args_dict={}):
     """ Compute the global minimum of the objective function.
@@ -36,8 +42,8 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_it
         The maximum number of iterations for the local algorithm.
     ftol: float
         Relative function value stopping criterion for the optimisation algorithms.
-    global_ftol_factor: float
-        For the global optimisation, `ftol` gets multiplied by this.
+    global_atol: float
+        The absolute tolerance for global optimisation.
     enable_global: bool
         Enable (or disable) the global minimisation part.
     enable_local: bool
@@ -45,7 +51,7 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_it
     cma_processes: int
         Number of processes used in the CMA algorithm. By default, the number of CPU cores is used.
     cma_population: int
-        The number of samples used in each step of the CMA algorithm. Should ideally be factor of `cma_threads`.
+        The number of samples used in each step of the CMA algorithm. Should ideally be factor of `cma_processes`.
     cma_stds: numpy.array
         Initial standard deviation of the spread of the population for each parameter in the CMA algorithm. Ideally,
         one should have the optimum within 3*sigma of the guessed initial value. If not specified, these values are
@@ -88,7 +94,7 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_it
 
         options = cma.CMAOptions()
         options['bounds'] = [bounds[:, 0], bounds[:, 1]]
-        options['tolfunrel'] = ftol * global_ftol_factor
+        options['tolfun'] = global_atol
         options['popsize'] = cma_population
 
         if cma_stds is None:
@@ -135,6 +141,8 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_it
         y_result = global_opt.best.f
 
         if verbose:
+            if iteration == global_max_iter:
+                print("Global optimisation: Maximum number of iterations reached.")
             print('Optimal value (global minimisation): ', y_result)
             print('Starting local minimisation...')
 
@@ -142,6 +150,7 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_it
     if enable_local:
         # Use derivative free local optimisation algorithm with support for boundary conditions
         # to converge to the next minimum (which is hopefully the global one).
+        dim = len(guess)
         local_opt = nlopt.opt(nlopt.LN_BOBYQA, guess.shape[0])
         local_opt.set_min_objective(lambda x, grad: objective_fct(x, grad, **args_dict))
         local_opt.set_lower_bounds(bounds[:,0])
@@ -149,10 +158,152 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100, local_max_it
         local_opt.set_ftol_rel(ftol)
         local_opt.set_maxeval(3*local_max_iter)
 
+        if enable_global:
+            # CMA gives us the scaling of the varialbes close to the minimum
+            min_stds = global_opt.result.stds
+            local_opt.set_initial_step(1/2 * min_stds)
+
         x_result = local_opt.optimize(x_result)
         y_result = local_opt.last_optimum_value()
 
         if verbose:
+            if local_opt.get_numevals() == 3*local_max_iter:
+                print("Local optimisation: Maximum number of iterations reached.")
             print('Optimal value (local minimisation): ', y_result)
 
     return x_result, y_result
+
+
+class PathosFuture:
+    """Implement Future inferface needed for nestle."""
+    def __init__(self, async_result, executor):
+        self.executor = executor
+        self.async_result = async_result
+
+    def result(self, timeout=None):
+       return self.async_result.get(timeout)
+
+    def cancel(self):
+        # We can't cancel individual computations, but we can terminate all tasks in the
+        # process pool. This is the only use case of cancel in nestle, so it is safe to
+        # do this here. Terminating and restarting the pool is quite slow, but typically
+        # faster than waiting for all computations in the queue to finish.
+        if self.executor.pool_running and not self.async_result.ready():
+            self.executor.pool.terminate()
+            self.executor.pool_running = False
+
+        return True
+
+
+class PathosExecutor:
+    """Implement Executor interface needed for nestle."""
+    def __init__(self, max_workers=None):
+        # Check that pathos is installed.
+        if pathos_mp is None:
+            raise Exception("Multiprocessed nested sampling needs the pathos package.")
+
+        # Check that nestle has a new enough version for the multiprocessing to work.
+        if not hasattr(nestle, "FakeFuture"):
+            # This will still run, although not multiprocessed. So just a warning here.
+            print("Warning: The installed nestle version does not support multiprocessing. For a")
+            print("parallelised version, install the current version from the github repository.")
+
+        if max_workers is None:
+            max_workers = multiprocessing.cpu_count()
+
+        self.pool = pathos_mp.ProcessingPool(max_workers)
+        self.pool_running = True
+
+    def submit(self, fn, *args, **kwargs):
+        if not self.pool_running:
+            self.pool.restart(True)
+            self.pool_running = True
+
+        r = self.pool.apipe(fn, *args, **kwargs)
+        return PathosFuture(r, self)
+
+    def map(self, fn, *iterables):
+        if not self.pool_running:
+            self.pool.restart(True)
+            self.pool_running = True
+
+        return self.pool.map(fn, *iterables)
+
+    def shutdown(self, wait=True):
+        self.pool.close()
+        if wait:
+            self.pool.join()
+        self.pool.clear()
+
+
+def nested_sampling(loglike, prior_transform, dim, queue_size, max_workers, verbose, method, npoints, maxiter, dlogz,
+                    decline_factor, loglike_args, prior_transform_args):
+    """Compute the log-evidence and a weighted samples of the log-likelihood using nested sampling.
+
+    This function uses the `nestle` Python library to run nested sampling on the given log-likelihood. For a current
+    version of `nestle`, the evaluations of the log-likelihood can be paralellised. This function returns the output
+    of the nestle.sample function. Most of the parameters correspond to input parameters of nestle.sample. See the
+    nestle documentation for details.
+
+    Parameters
+    ----------
+    loglike: function
+        The log-likelihood function. Keyword arguments can be passed to this function via the loglike_args parameter.
+    prior_transform: function
+        Return a prior sample from a random point in [0,1]^dim. Keyword arguments can be passed to this function via
+        the prior_transform_args parameter.
+    dim: int
+        Dimension of the parameter space.
+    queue_size: int
+        Size of the internal queue of samples of the nested sampling algorithm. The log-likelihood of these samples
+        is computed in parallel (if queue_size > 1).
+    max_workers: int
+        The maximal number of processes used to compute samples.
+    verbose: bool
+        If true, output the state of nestle.sample every 100 iterations.
+    method: str
+        The method used by nestle.sample ("single", "multi", "classic").
+    npoints: int
+        The number of active points. Larger numbers result in a more accurate evidence with higher computational cost.
+    maxiter: int
+        The maximum number of iterations in nestle.sample.
+    dlogz: float
+        Stopping threshold for the estimated error of the log-evidence. This option is mutually exclusive with `decline_factor`.
+    decline_factor: float
+        Stop the iteration when the weight (likelihood times prior volume) of newly saved samples has been declining for
+        `decline_factor * nsamples` consecutive samples. This option is mutually exclusive with `dlogz`.
+    loglike_args: dict
+        Keyword parameter dictionary passed to loglike function.
+    prior_transform_args: dict
+        Keyword parameter dictionary passed to prior_transform function.
+
+    Returns
+    -------
+    result: nestle.Result
+        Result of the computation (log evidence is given by result.logz).
+    """
+    if nestle is None:
+        raise Exception("Nested sampling needs the nestle package.")
+
+    if verbose:
+        def callback(d):
+            if d["it"] % 100 == 0:
+                print("Iteration {}: log_evidence = {}".format(d["it"], d["logz"]))
+    else:
+        callback = None
+
+    ll = lambda params: loglike(params, **loglike_args)
+    pt = lambda x: prior_transform(x, **prior_transform_args)
+    if queue_size > 1:
+        # Multiprocessed version.
+        executor = PathosExecutor(max_workers)
+        result = nestle.sample(ll, pt, dim, queue_size=queue_size, pool=executor, npoints=npoints, maxiter=maxiter,
+                               dlogz=dlogz, decline_factor=decline_factor, callback=callback)
+        executor.shutdown()
+
+        return result
+
+    # No multiprocessing.
+    result = nestle.sample(ll, pt, dim, queue_size=queue_size, npoints=npoints, maxiter=maxiter,
+                           dlogz=dlogz, decline_factor=decline_factor, callback=callback)
+    return result

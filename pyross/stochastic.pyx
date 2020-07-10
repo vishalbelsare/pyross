@@ -1858,819 +1858,6 @@ cdef class SEIR(stochastic_integration):
 
 
 
-cdef class SEI5R(stochastic_integration):
-    warnings.warn('SEI5R not supported', DeprecationWarning)
-    """
-    Susceptible, Exposed, Infected, Removed (SEIR)
-    The infected class has 5 groups:
-    * Ia: asymptomatic
-    * Is: symptomatic
-    * Ih: hospitalized
-    * Ic: ICU
-    * Im: Mortality
-
-    ...
-
-    Parameters
-    ----------
-     parameters: dict
-        Contains the following keys:
-
-        alpha: float, np.array (M,)
-            fraction of infected who are asymptomatic.
-        beta: float
-            rate of spread of infection.
-        gE: float
-            rate of removal from exposeds individuals.
-        gIa: float
-            rate of removal from asymptomatic individuals.
-        gIs: float
-            rate of removal from symptomatic individuals.
-        gIh: float
-            rate of removal for hospitalised individuals.
-        gIc: float
-            rate of removal for idividuals in intensive care.
-        fsa: float
-            fraction by which symptomatic individuals self isolate.
-        fh  : float
-            fraction by which hospitalised individuals are isolated.
-        sa: float, np.array (M,)
-            daily arrival of new susceptables.
-            sa is rate of additional/removal of population by birth etc
-        hh: float, np.array (M,)
-            fraction hospitalised from Is
-        cc: float, np.array (M,)
-            fraction sent to intensive care from hospitalised.
-        mm: float, np.array (M,)
-            mortality rate in intensive care
-        seed: long
-            seed for pseudo-random number generator (optional).
-    M: int
-        Number of compartments of individual for each class.
-        I.e len(contactMatrix)
-    Ni: np.array(8*M, )
-        Initial number in each compartment and class
-    """
-
-    cdef:
-        readonly double beta, gE, gIa, gIs, gIh, gIc, fsa, fh
-        readonly np.ndarray xt0, Ni, dxtdt, CC, sa, iaa, hh, cc, mm, alpha, population
-        int nClass_
-
-    def __init__(self, parameters, M, Ni):
-        cdef:
-            int nRpa # short for number of reactions per age group
-
-        alpha      = parameters['alpha']                    # fraction of asymptomatic infectives
-        self.beta  = parameters['beta']                     # infection rate
-        self.gE    = parameters['gE']                       # removal rate of E class
-        self.gIa   = parameters['gIa']                      # removal rate of Ia
-        self.gIs   = parameters['gIs']                      # removal rate of Is
-        self.gIh   = parameters['gIh']                      # removal rate of Is
-        self.gIc   = parameters['gIc']                      # removal rate of Is
-        self.fsa   = parameters['fsa']                      # the self-isolation parameter of symptomatics
-        self.fh    = parameters['fh']                       # the self-isolation parameter of hospitalizeds
-
-        sa         = parameters['sa']                       # daily arrival of new susceptibles
-        hh         = parameters['hh']                       # hospital
-        cc         = parameters['cc']                       # ICU
-        mm         = parameters['mm']                       # mortality
-        iaa        = parameters['iaa']                      # daily arrival of new asymptomatics
-
-        self.N     = np.sum(Ni)
-        self.M     = M
-        self.Ni    = np.zeros( self.M, dtype=DTYPE)             # # people in each age-group
-        self.Ni    = np.array(Ni.copy(),dtype=long)
-
-        self.nClass = 7  # number of classes (used in unit tests)
-        self.nClass_ = 8 # number of explicit classes used in this function
-        # explicit states per age group:
-        # 1. S    susceptibles
-        # 2. E    exposed
-        # 3. Ia   infectives, asymptomatic
-        # 4. Is   infectives, symptomatic
-        # 5. Ih   infectives, hospitalised
-        # 6. Ic   infectives, in ICU
-        # 7. Im   infectives, deceased
-        # 8. R    Removed
-
-        self.nReactions_per_agegroup = 11
-        self.nReactions = self.M * self.nReactions_per_agegroup
-        self.dim_state_vec = self.nClass_ * self.M
-
-        self.CM    = np.zeros( (self.M, self.M), dtype=DTYPE)   # contact matrix C
-        self.rates = np.zeros( self.nReactions , dtype=DTYPE)  # rate matrix
-        self.xt = np.zeros([self.dim_state_vec],dtype=long) # state
-        self.xtminus1 = np.zeros([self.dim_state_vec],dtype=long) # previous state
-        # (for event-driven simulations)
-
-        self.alpha = np.zeros( self.M, dtype = DTYPE)
-        if np.size(alpha)==1:
-            self.alpha = alpha*np.ones(M)
-        elif np.size(alpha)==M:
-            self.alpha= alpha
-        else:
-            raise Exception('alpha can be a number or an array of size M')
-
-        self.sa    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(sa)==1:
-            self.sa = sa*np.ones(M)
-        elif np.size(sa)==M:
-            self.sa= sa
-        else:
-            print('sa can be a number or an array of size M')
-
-        self.hh    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(hh)==1:
-            self.hh = hh*np.ones(M)
-        elif np.size(hh)==M:
-            self.hh= hh
-        else:
-            print('hh can be a number or an array of size M')
-
-        self.cc    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(cc)==1:
-            self.cc = cc*np.ones(M)
-        elif np.size(cc)==M:
-            self.cc= cc
-        else:
-            print('cc can be a number or an array of size M')
-
-        self.mm    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(mm)==1:
-            self.mm = mm*np.ones(M)
-        elif np.size(mm)==M:
-            self.mm= mm
-        else:
-            print('mm can be a number or an array of size M')
-
-        self.iaa    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(iaa)==1:
-            self.iaa = iaa*np.ones(M)
-        elif np.size(iaa)==M:
-            self.iaa = iaa
-        else:
-            print('iaa can be a number or an array of size M')
-
-        # Set seed for pseudo-random number generator (if provided)
-        try:
-            self.initialize_random_number_generator(
-                                  supplied_seed=parameters['seed'])
-        except KeyError:
-            self.initialize_random_number_generator()
-
-        # create vectors of change for reactions
-        self.vectors_of_change = np.zeros((self.nReactions,self.dim_state_vec),
-                                          dtype=long)
-        # self.vectors_of_change[i,j] = change in population j at reaction i
-        nRpa = self.nReactions_per_agegroup
-        for i in range(M):
-            # birth rate
-            # population of S increases by 1
-            self.vectors_of_change[  i*nRpa,i    ] = +1
-            #
-            # reaction S -> E at age group i:
-            # population of S decreases by 1, population of E increases by 1
-            self.vectors_of_change[1+i*nRpa,i    ] = -1
-            self.vectors_of_change[1+i*nRpa,i+  M] = +1
-            #
-            # reaction E -> Ia at age group i:
-            # population of E decreases by 1, population of Ia increases by 1
-            self.vectors_of_change[2+i*nRpa,i+  M] = -1
-            self.vectors_of_change[2+i*nRpa,i+2*M] = +1
-            #
-            # reaction E -> Is at age group i:
-            # population of E decreases by 1, population of Is increases by 1
-            self.vectors_of_change[3+i*nRpa,i+  M] = -1
-            self.vectors_of_change[3+i*nRpa,i+3*M] = +1
-            #
-            # reaction Ia -> R at age group i:
-            # population of Ia decreases by 1, population of R increases by 1
-            self.vectors_of_change[4+i*nRpa,i+2*M] = -1
-            self.vectors_of_change[4+i*nRpa,i+7*M] = +1
-            #
-            # reaction Is -> R at age group i:
-            # population of Is decreases by 1, population of R increases by 1
-            self.vectors_of_change[5+i*nRpa,i+3*M] = -1
-            self.vectors_of_change[5+i*nRpa,i+7*M] = +1
-            #
-            # reaction Is -> Ih at age group i:
-            self.vectors_of_change[6+i*nRpa,i+3*M] = -1
-            self.vectors_of_change[6+i*nRpa,i+4*M] = +1
-            #
-            # reaction Ih -> R at age group i:
-            self.vectors_of_change[7+i*nRpa,i+4*M] = -1
-            self.vectors_of_change[7+i*nRpa,i+7*M] = +1
-            #
-            # reaction Ih -> Ic at age group i:
-            self.vectors_of_change[8+i*nRpa,i+4*M] = -1
-            self.vectors_of_change[8+i*nRpa,i+5*M] = +1
-            #
-            # reaction Ic -> R at age group i:
-            self.vectors_of_change[9+i*nRpa,i+5*M] = -1
-            self.vectors_of_change[9+i*nRpa,i+7*M] = +1
-            #
-            # reaction Ic -> Im at age group i:
-            self.vectors_of_change[10+i*nRpa,i+5*M] = -1
-            self.vectors_of_change[10+i*nRpa,i+6*M] = +1
-        
-        self.readData = {'Ei':[1,2], 'Iai':[2,3], 
-                        'Isi':[3,4], 
-                        'Ihi':[4,5], 
-                        'Ici':[5,6], 
-                        'Imi':[6,7], 'Rind':6}
-
-    cdef rate_vector(self, xt, tt):
-        cdef:
-            int N=self.N, M=self.M, i, j
-            double beta=self.beta, rateS, lmda
-            double fsa=self.fsa, fh=self.fh,  gE=self.gE
-            double gIs=self.gIs, gIa=self.gIa, gIh=self.gIh, gIc=self.gIh
-            double ce1, ce2
-            #
-            long [:] S    = xt[0  :M]
-            long [:] E    = xt[M  :2*M]
-            long [:] Ia   = xt[2*M:3*M]
-            long [:] Is   = xt[3*M:4*M]
-            long [:] Ih   = xt[4*M:5*M]
-            long [:] Ic   = xt[5*M:6*M]
-            long [:] Im   = xt[6*M:7*M]
-            long [:] R    = xt[7*M:8*M]
-            #
-            long [:] Ni    = self.Ni
-            #
-            double [:] alpha= self.alpha
-            double [:] sa   = self.sa
-            double [:] iaa  = self.iaa
-            double [:] hh   = self.hh
-            double [:] cc   = self.cc
-            double [:] mm   = self.mm
-            #
-            double [:,:] CM = self.CM
-            double [:] rates = self.rates
-            int nRpa = self.nReactions_per_agegroup
-
-        # update Ni
-        for i in range(M):
-            Ni[i] = S[i] + E[i] + Ia[i] + Is[i] + Ih[i] + Ic[i] + R[i]
-
-        for i in range(M):
-            lmda=0;   ce1=gE*alpha[i];  ce2=gE-ce1
-            for j in range(M):
-                lmda += beta*CM[i,j]*(Ia[j]+fsa*Is[j]+fh*Ih[j])/Ni[j]
-            rateS = lmda*S[i]
-            #
-            rates[  i*nRpa]  = sa[i] # birth rate
-            rates[1+i*nRpa]  =  rateS  # rate S -> E
-            rates[2+i*nRpa]  = ce1 * E[i] # rate E -> Ia
-            rates[3+i*nRpa]  = ce2 * E[i] # rate E -> Is
-            #
-            rates[4+i*nRpa]  = gIa * Ia[i] # rate Ia -> R
-            #
-            rates[5+i*nRpa]  = (1.-hh[i])*gIs * Is[i] # rate Is -> R
-            rates[6+i*nRpa]  = hh[i]*gIs * Is[i] # rate Is -> Ih
-            #
-            rates[7+i*nRpa]  = (1.-cc[i])*gIh * Ih[i] # rate Ih -> R
-            rates[8+i*nRpa]  = cc[i]*gIh * Ih[i] # rate Ih -> Ic
-            #
-            rates[9+i*nRpa]  = (1.-mm[i])*gIc * Ic[i] # rate Ic -> R
-            rates[10+i*nRpa] = mm[i]*gIc * Ic[i] # rate Ic -> Im
-            #
-        return
-
-
-    cpdef simulate(self, S0, E0, Ia0, Is0, Ih0, Ic0, Im0,
-                  contactMatrix, Tf, Nf,
-                method='gillespie',
-                int nc=30, double epsilon = 0.03,
-                int tau_update_frequency = 1,
-                ):
-        cdef:
-            int M = self.M, i
-            long [:] xt = self.xt
-
-        # write initial condition to xt
-        for i in range(M):
-            xt[i] = S0[i]
-            xt[i+M] = E0[i]
-            xt[i+2*M] = Ia0[i]
-            xt[i+3*M] = Is0[i]
-            xt[i+4*M] = Ih0[i]
-            xt[i+5*M] = Ic0[i]
-            xt[i+6*M] = Im0[i]
-            xt[i+7*M] = self.Ni[i] - S0[i] - E0[i] - Ia0[i] - Is0[i] \
-                                   - Ih0[i] - Ic0[i] - Im0[i]
-            if xt[i+7*M] < 0:
-                xt[i+7*M] = 0
-                # It is probably better to have the error message below,
-                # to warn the user if their input numbers do not match?
-                #raise RuntimeError("Sum of provided initial populations for class" + \
-                #    " {0} exceeds total initial population for that class\n".format(i) + \
-                #    " {0} > {1}".format(xt[i+7*M],self.Ni[i]))
-
-        if method.lower() == 'gillespie':
-            t_arr, out_arr =  self.simulate_gillespie(contactMatrix, Tf, Nf)
-        else:
-            t_arr, out_arr =  self.simulate_tau_leaping(contactMatrix, Tf, Nf,
-                                  nc=nc,
-                                  epsilon= epsilon,
-                                  tau_update_frequency=tau_update_frequency)
-        # Instead of the removed population, which is stored in the last compartment,
-        # we want to output the total alive population (whose knowledge is mathematically
-        # equivalent to knowing the removed population).
-        for i in range(M):
-            out_arr[:,i+7*M] += out_arr[:,i+5*M] + out_arr[:,i+4*M] + out_arr[:,i+3*M]
-            out_arr[:,i+7*M] += out_arr[:,i+2*M] + out_arr[:,i+1*M] + out_arr[:,i+0*M]
-
-
-        out_dict = {'X':out_arr, 't':t_arr,
-                      'Ni':self.Ni, 'M':self.M,
-                      'alpha':self.alpha, 'beta':self.beta,
-                      'gIa':self.gIa,'gIs':self.gIs,
-                      'gIh':self.gIh,'gIc':self.gIc,
-                      'fsa':self.fsa,'fh':self.fh,
-                      'gE':self.gE,
-                      'sa':self.sa,'hh':self.hh,
-                      'mm':self.mm,'cc':self.cc,
-                      'iaa':self.iaa,
-                      }
-        self.population = (out_dict['X'])[:,7*self.M:8*self.M]
-        return out_dict
-
-
-    cpdef simulate_events(self, S0, E0, Ia0, Is0, Ih0, Ic0, Im0,
-                events, contactMatrices, Tf, Nf,
-                method='gillespie',
-                int nc=30, double epsilon = 0.03,
-                int tau_update_frequency = 1,
-                  events_repeat=False,events_subsequent=True,
-                  stop_at_event=False,
-                ):
-        cdef:
-            int M = self.M, i
-            long [:] xt = self.xt
-            list events_out
-            np.ndarray out_arr, t_arr
-
-        # write initial condition to xt
-        for i in range(M):
-            xt[i] = S0[i]
-            xt[i+M] = E0[i]
-            xt[i+2*M] = Ia0[i]
-            xt[i+3*M] = Is0[i]
-            xt[i+4*M] = Ih0[i]
-            xt[i+5*M] = Ic0[i]
-            xt[i+6*M] = Im0[i]
-            xt[i+7*M] = self.Ni[i] - S0[i] - E0[i] - Ia0[i] - Is0[i]
-            xt[i+7*M] -= Ih0[i] + Ic0[i] + Im0[i]
-            if xt[i+7*M] < 0:
-                xt[i+7*M] = 0
-                # It is probably better to have the error message below,
-                # to warn the user if their input numbers do not match?
-                #raise RuntimeError("Sum of provided initial populations for class" + \
-                #    " {0} exceeds total initial population for that class\n".format(i) + \
-                #    " {0} > {1}".format(xt[i+7*M],self.Ni[i]))
-
-        if method.lower() == 'gillespie':
-            t_arr, out_arr, events_out =  self.simulate_gillespie_events(events=events,
-                                  contactMatrices=contactMatrices,
-                                  Tf=Tf, Nf=Nf,
-                                  events_repeat=events_repeat,
-                                  events_subsequent=events_subsequent,
-                                  stop_at_event=stop_at_event)
-        else:
-            t_arr, out_arr, events_out =  self.simulate_tau_leaping_events(events=events,
-                                  contactMatrices=contactMatrices,
-                                  Tf=Tf, Nf=Nf,
-                                  nc=nc,
-                                  epsilon= epsilon,
-                                  tau_update_frequency=tau_update_frequency,
-                                  events_repeat=events_repeat,
-                                  events_subsequent=events_subsequent,
-                                  stop_at_event=stop_at_event)
-
-        out_dict = {'X':out_arr, 't':t_arr,  'events_occured':events_out,
-                    'Ni':self.Ni, 'M':self.M,
-                    'alpha':self.alpha, 'beta':self.beta,
-                    'gIa':self.gIa,'gIs':self.gIs,
-                    'gIh':self.gIh,'gIc':self.gIc,
-                    'fsa':self.fsa,'fh':self.fh,
-                    'gE':self.gE,
-                    'sa':self.sa,'hh':self.hh,
-                    'mm':self.mm,'cc':self.cc,
-                    'iaa':self.iaa,
-                    }
-
-        self.population = (out_dict['X'])[:,7*self.M:8*self.M]
-        return out_dict
-
-
-
-
-cdef class SEAI5R(stochastic_integration):
-    warnings.warn('SEAI5R not supported', DeprecationWarning)
-    """
-    Susceptible, Exposed, Activates, Infected, Removed (SEAIR)
-    The infected class has 5 groups:
-
-    * Ia: asymptomatic
-    * Is: symptomatic
-    * Ih: hospitalized
-    * Ic: ICU
-    * Im: Mortality
-
-    ...
-
-    Parameters
-    ----------
-    parameters: dict
-        Contains the following keys:
-
-        alpha: float, np.array (M,)
-            fraction of infected who are asymptomatic.
-        beta: float
-            rate of spread of infection.
-        gIa: float
-            rate of removal from asymptomatic individuals.
-        gIs: float
-            rate of removal from symptomatic individuals.
-        fsa: float
-            fraction by which symptomatic individuals self isolate.
-        gE: float
-            rate of removal from exposeds individuals.
-        gA: float
-            rate of removal from activated individuals.
-        gIh: float
-            rate of hospitalisation of infected individuals.
-        gIc: float
-            rate hospitalised individuals are moved to intensive care.
-        seed: long
-            seed for pseudo-random number generator (optional).
-    M: int
-        Number of compartments of individual for each class.
-        I.e len(contactMatrix)
-    Ni: np.array(9*M, )
-        Initial number in each compartment and class.
-    """
-
-    cdef:
-        readonly double beta, gE, gA, gIa, gIs, gIh, gIc, fsa, fh
-        readonly np.ndarray xt0, Ni, dxtdt, CC, sa, hh, cc, mm, alpha, population
-        int nClass_
-
-    def __init__(self, parameters, M, Ni):
-        cdef:
-            int nRpa # short for number of reactions per age group
-
-        alpha      = parameters['alpha']                    # fraction of asymptomatic infectives
-        self.beta  = parameters['beta']                     # infection rate
-        self.gE    = parameters['gE']                       # progression rate of E class
-        self.gA    = parameters['gA']                       # progression rate of A class
-        self.gIa   = parameters['gIa']                      # removal rate of Ia
-        self.gIs   = parameters['gIs']                      # removal rate of Is
-        self.gIh   = parameters['gIh']                      # removal rate of Ih
-        self.gIc   = parameters['gIc']                      # removal rate of Ic
-        self.fsa   = parameters['fsa']                      # the self-isolation parameter of symptomatics
-        self.fh    = parameters['fh']                       # the self-isolation parameter of hospitalizeds
-
-        sa         = parameters['sa']                       # daily arrival of new susceptibles
-        hh         = parameters['hh']                       # hospital
-        cc         = parameters['cc']                       # ICU
-        mm         = parameters['mm']                       # mortality
-        #iaa        = parameters['iaa')                      # daily arrival of new asymptomatics
-
-        self.N     = np.sum(Ni)
-        self.M     = M
-        #self.Ni    = np.zeros( self.M, dtype=DTYPE)             # # people in each age-group
-        self.Ni    = np.array( Ni.copy(), dtype=long)
-
-        self.nClass = 8  # number of classes (used in unit tests)
-        self.nClass_ = 9 # number of explicit classes used in this function
-        # explicit states per age group:
-        # 1. S    susceptibles
-        # 2. E    exposed
-        # 3. A    Asymptomatic and infected
-        # 4. Ia   infectives, asymptomatic
-        # 5. Is   infectives, symptomatic
-        # 6. Ih   infectives, hospitalised
-        # 7. Ic   infectives, in ICU
-        # 8. Im   infectives, deceased
-        # 9. R    removed
-
-        self.nReactions_per_agegroup = 12
-        self.nReactions = self.M * self.nReactions_per_agegroup
-        self.dim_state_vec = self.nClass_ * self.M
-
-        self.CM    = np.zeros( (self.M, self.M), dtype=DTYPE)   # contact matrix C
-        self.rates = np.zeros( self.nReactions , dtype=DTYPE)  # rate matrix
-        self.xt = np.zeros([self.dim_state_vec],dtype=long) # state
-        self.xtminus1 = np.zeros([self.dim_state_vec],dtype=long) # previous state
-        # (for event-driven simulations)
-
-        self.alpha    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(alpha)==1:
-            self.alpha = alpha*np.ones(M)
-        elif np.size(alpha)==M:
-            self.alpha= alpha
-        else:
-            raise Exception('alpha can be a number or an array of size M')
-
-        self.sa    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(sa)==1:
-            self.sa = sa*np.ones(M)
-        elif np.size(sa)==M:
-            self.sa= sa
-        else:
-            print('sa can be a number or an array of size M')
-
-        self.hh    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(hh)==1:
-            self.hh = hh*np.ones(M)
-        elif np.size(hh)==M:
-            self.hh= hh
-        else:
-            print('hh can be a number or an array of size M')
-
-        self.cc    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(cc)==1:
-            self.cc = cc*np.ones(M)
-        elif np.size(cc)==M:
-            self.cc= cc
-        else:
-            print('cc can be a number or an array of size M')
-
-        self.mm    = np.zeros( self.M, dtype = DTYPE)
-        if np.size(mm)==1:
-            self.mm = mm*np.ones(M)
-        elif np.size(mm)==M:
-            self.mm= mm
-        else:
-            print('mm can be a number or an array of size M')
-
-        # Set seed for pseudo-random number generator (if provided)
-        try:
-            self.initialize_random_number_generator(
-                                  supplied_seed=parameters['seed'])
-        except KeyError:
-            self.initialize_random_number_generator()
-
-        # create vectors of change for reactions
-        self.vectors_of_change = np.zeros((self.nReactions,self.dim_state_vec),
-                                          dtype=long)
-        # self.vectors_of_change[i,j] = change in population j at reaction i
-        nRpa = self.nReactions_per_agegroup
-        for i in range(M):
-            # birth rate
-            # population of S increases by 1
-            self.vectors_of_change[  i*nRpa,i    ] = +1
-            #
-            # reaction S -> E at age group i:
-            # population of S decreases by 1, population of E increases by 1
-            self.vectors_of_change[1+i*nRpa,i    ] = -1
-            self.vectors_of_change[1+i*nRpa,i+  M] = +1
-            #
-            # reaction E -> A at age group i:
-            # population of E decreases by 1, population of A increases by 1
-            self.vectors_of_change[2+i*nRpa,i+  M] = -1
-            self.vectors_of_change[2+i*nRpa,i+2*M] = +1
-            #
-            # reaction A -> Ia at age group i:
-            # population of A decreases by 1, population of Ia increases by 1
-            self.vectors_of_change[3+i*nRpa,i+2*M] = -1
-            self.vectors_of_change[3+i*nRpa,i+3*M] = +1
-            #
-            # reaction A -> Is at age group i:
-            # population of E decreases by 1, population of Is increases by 1
-            self.vectors_of_change[4+i*nRpa,i+2*M] = -1
-            self.vectors_of_change[4+i*nRpa,i+4*M] = +1
-            #
-            # reaction Ia -> R at age group i:
-            # population of Ia decreases by 1, population of R increases by 1
-            self.vectors_of_change[5+i*nRpa,i+3*M] = -1
-            self.vectors_of_change[5+i*nRpa,i+8*M] = +1
-            #
-            # reaction Is -> R at age group i:
-            # population of Is decreases by 1, population of R increases by 1
-            self.vectors_of_change[6+i*nRpa,i+4*M] = -1
-            self.vectors_of_change[6+i*nRpa,i+8*M] = +1
-            #
-            # reaction Is -> Ih at age group i:
-            self.vectors_of_change[7+i*nRpa,i+4*M] = -1
-            self.vectors_of_change[7+i*nRpa,i+5*M] = +1
-            #
-            # reaction Ih -> R at age group i:
-            self.vectors_of_change[8+i*nRpa,i+5*M] = -1
-            self.vectors_of_change[8+i*nRpa,i+8*M] = +1
-            #
-            # reaction Ih -> Ic at age group i:
-            self.vectors_of_change[9+i*nRpa,i+5*M] = -1
-            self.vectors_of_change[9+i*nRpa,i+6*M] = +1
-            #
-            # reaction Ic -> R at age group i:
-            self.vectors_of_change[10+i*nRpa,i+6*M] = -1
-            self.vectors_of_change[10+i*nRpa,i+8*M] = +1
-            #
-            # reaction Ic -> Im at age group i:
-            self.vectors_of_change[11+i*nRpa,i+6*M] = -1
-            self.vectors_of_change[11+i*nRpa,i+7*M] = +1
-        
-        self.readData = {'Ei':[1,2], 'Ai':[2,3], 'Iai':[3,4], 
-                        'Isi':[4,5], 
-                        'Ihi':[5,6], 
-                        'Ici':[6,7], 
-                        'Imi':[7,8], 'Rind':7}
-
-    cdef rate_vector(self, xt, tt):
-        cdef:
-            int N=self.N, M=self.M, i, j
-            double beta=self.beta, rateS, lmda
-            double fsa=self.fsa, fh=self.fh, gE=self.gE,  gA=self.gA
-            double gIs=self.gIs, gIa=self.gIa, gIh=self.gIh, gIc=self.gIh
-            double gAA, gAS
-            #
-            long [:] S    = xt[0  :  M]
-            long [:] E    = xt[M  :2*M]
-            long [:] A    = xt[2*M:3*M]
-            long [:] Ia   = xt[3*M:4*M]
-            long [:] Is   = xt[4*M:5*M]
-            long [:] Ih   = xt[5*M:6*M]
-            long [:] Ic   = xt[6*M:7*M]
-            long [:] Im   = xt[7*M:8*M]
-            long [:] R    = xt[8*M:9*M]
-            #
-            long [:] Ni    = self.Ni
-            #
-            double [:] alpha= self.alpha
-            double [:] sa   = self.sa
-            double [:] hh   = self.hh
-            double [:] cc   = self.cc
-            double [:] mm   = self.mm
-            #
-            double [:,:] CM = self.CM
-            double [:] rates = self.rates
-            int nRpa = self.nReactions_per_agegroup
-
-        # update Ni
-        for i in range(M):
-            Ni[i] = S[i] + E[i] + A[i] + Ia[i] + Is[i] + Ih[i] + Ic[i] + R[i]
-
-        for i in range(M):
-            lmda=0;   gAA=gA*alpha[i];  gAS=gA-gAA
-            for j in range(M):
-                lmda += beta*CM[i,j]*(A[j] + Ia[j]+fsa*Is[j]+fh*Ih[j])/Ni[j]
-            rateS = lmda*S[i]
-            #
-            # rates from S
-            rates[  i*nRpa]  = sa[i] # birth rate
-            rates[1+i*nRpa]  = rateS  # rate S -> E
-            # rates from E
-            rates[2+i*nRpa]  = gE * E[i] # rate E -> A
-            # rates from A
-            rates[3+i*nRpa]  = gAA * A[i] # rate A -> Ia
-            rates[4+i*nRpa]  = gAS * A[i] # rate A -> Is
-            # rates from Ia
-            rates[5+i*nRpa]  = gIa * Ia[i] # rate Ia -> R
-            # rates from Is
-            rates[6+i*nRpa]  = (1.-hh[i])*gIs * Is[i] # rate Is -> R
-            rates[7+i*nRpa]  = hh[i]*gIs * Is[i] # rate Is -> Ih
-            # rate from Ih
-            rates[8+i*nRpa]  = (1.-cc[i])*gIh * Ih[i] # rate Ih -> R
-            rates[9+i*nRpa]  = cc[i]*gIh * Ih[i] # rate Ih -> Ic
-            # rates from Ic
-            rates[10+i*nRpa]  = (1.-mm[i])*gIc * Ic[i] # rate Ic -> R
-            rates[11+i*nRpa]  = mm[i]*gIc * Ic[i] # rate Ic -> Im
-            #
-        return
-
-
-    cpdef simulate(self, S0, E0, A0, Ia0, Is0, Ih0, Ic0, Im0,
-                  contactMatrix, Tf, Nf,
-                method='gillespie',
-                int nc=30, double epsilon = 0.03,
-                int tau_update_frequency = 1,
-                ):
-        cdef:
-            int M = self.M, i
-            long [:] xt = self.xt
-
-        R_0 = self.Ni-(S0+E0+A0+Ia0+Is0+Ih0+Ic0)
-        # write initial condition to xt
-        for i in range(M):
-            xt[i] = S0[i]
-            xt[i+M] = E0[i]
-            xt[i+2*M] = A0[i]
-            xt[i+3*M] = Ia0[i]
-            xt[i+4*M] = Is0[i]
-            xt[i+5*M] = Ih0[i]
-            xt[i+6*M] = Ic0[i]
-            xt[i+7*M] = Im0[i]
-            xt[i+8*M] = R_0[i]
-            #print(xt[i+7*M])
-            if xt[i+8*M] < 0:
-                raise RuntimeError("Sum of provided initial populations for class" + \
-                    " {0} exceeds total initial population for that class\n".format(i) + \
-                    " {0} > {1}".format(xt[i+8*M],self.Ni[i]))
-        if method.lower() == 'gillespie':
-            t_arr, out_arr =  self.simulate_gillespie(contactMatrix, Tf, Nf)
-        else:
-            t_arr, out_arr =  self.simulate_tau_leaping(contactMatrix, Tf, Nf,
-                                  nc=nc,
-                                  epsilon= epsilon,
-                                  tau_update_frequency=tau_update_frequency)
-        # Instead of the removed population, which is stored in the last compartment,
-        # we want to output the total alive population (whose knowledge is mathematically
-        # equivalent to knowing the removed population).
-        for i in range(M):
-            out_arr[:,i+8*M] += out_arr[:,i+6*M]
-            out_arr[:,i+8*M] += out_arr[:,i+5*M] + out_arr[:,i+4*M] + out_arr[:,i+3*M]
-            out_arr[:,i+8*M] += out_arr[:,i+2*M] + out_arr[:,i+1*M] + out_arr[:,i]
-
-        out_dict = {'X':out_arr, 't':t_arr,
-                      'Ni':self.Ni, 'M':self.M,
-                      'alpha':self.alpha, 'beta':self.beta,
-                      'gIa':self.gIa,'gIs':self.gIs,
-                      'gIh':self.gIh,'gIc':self.gIc,
-                      'fsa':self.fsa,'fh':self.fh,
-                      'gE':self.gE,'gA':self.gA,
-                      'sa':self.sa,'hh':self.hh,
-                      'mm':self.mm,'cc':self.cc,
-                      #'iaa':self.iaa,
-                      }
-        self.population = (out_dict['X'])[:,8*self.M:9*self.M]
-        return out_dict
-
-
-
-    cpdef simulate_events(self, S0, E0, A0, Ia0, Is0, Ih0, Ic0, Im0,
-                events, contactMatrices, Tf, Nf,
-                method='gillespie',
-                int nc=30, double epsilon = 0.03,
-                int tau_update_frequency = 1,
-                  events_repeat=False,events_subsequent=True,
-                  stop_at_event=False,
-                ):
-        cdef:
-            int M = self.M, i
-            long [:] xt = self.xt
-            list events_out
-            np.ndarray out_arr, t_arr
-
-        # write initial condition to xt
-        for i in range(M):
-            xt[i] = S0[i]
-            xt[i+M] = E0[i]
-            xt[i+2*M] = A0[i]
-            xt[i+3*M] = Ia0[i]
-            xt[i+4*M] = Is0[i]
-            xt[i+5*M] = Ih0[i]
-            xt[i+6*M] = Ic0[i]
-            xt[i+7*M] = Im0[i]
-            xt[i+8*M] = self.Ni[i] - S0[i] - E0[i] - A0[i] - Ia0[i] - Is0[i]
-            xt[i+8*M] -= Ih0[i] + Ic0[i] + Im0[i]
-            #print(xt[i+7*M])
-            if xt[i+8*M] < 0:
-                raise RuntimeError("Sum of provided initial populations for class" + \
-                    " {0} exceeds total initial population for that class\n".format(i) + \
-                    " {0} > {1}".format(xt[i+8*M],self.Ni[i]))
-
-        if method.lower() == 'gillespie':
-            t_arr, out_arr, events_out =  self.simulate_gillespie_events(events=events,
-                                  contactMatrices=contactMatrices,
-                                  Tf=Tf, Nf=Nf,
-                                  events_repeat=events_repeat,
-                                  events_subsequent=events_subsequent,
-                                  stop_at_event=stop_at_event)
-        else:
-            t_arr, out_arr, events_out =  self.simulate_tau_leaping_events(events=events,
-                                  contactMatrices=contactMatrices,
-                                  Tf=Tf, Nf=Nf,
-                                  nc=nc,
-                                  epsilon= epsilon,
-                                  tau_update_frequency=tau_update_frequency,
-                                  events_repeat=events_repeat,
-                                  events_subsequent=events_subsequent,
-                                  stop_at_event=stop_at_event)
-        # Instead of the removed population, which is stored in the last compartment,
-        # we want to output the total alive population (whose knowledge is mathematically
-        # equivalent to knowing the removed population).
-        for i in range(M):
-            out_arr[:,i+8*M] += out_arr[:,i+6*M]
-            out_arr[:,i+8*M] += out_arr[:,i+5*M] + out_arr[:,i+4*M] + out_arr[:,i+3*M]
-            out_arr[:,i+8*M] += out_arr[:,i+2*M] + out_arr[:,i+1*M] + out_arr[:,i+0*M]
-
-        out_dict = {'X':out_arr, 't':t_arr,  'events_occured':events_out,
-                    'Ni':self.Ni, 'M':self.M,
-                    'alpha':self.alpha, 'beta':self.beta,
-                    'gIa':self.gIa,'gIs':self.gIs,
-                    'gIh':self.gIh,'gIc':self.gIc,
-                    'fsa':self.fsa,'fh':self.fh,
-                    'gE':self.gE,'gA':self.gA,
-                    'sa':self.sa,'hh':self.hh,
-                    'mm':self.mm,'cc':self.cc,
-                    #'iaa':self.iaa,
-                    }
-        self.population = (out_dict['X'])[:,8*self.M:9*self.M]
-        return out_dict
 
 
 
@@ -2973,10 +2160,10 @@ cdef class SEAIRQ_testing(stochastic_integration):
     """
     Susceptible, Exposed, Asymptomatic and infected, Infected, Removed, Quarantined (SEAIRQ)
 
-    * Ia: asymptomatic
-    * Is: symptomatic
-    * A: Asymptomatic and infectious
     * E: exposed
+    * A: Asymptomatic and infectious
+    * Ia: asymptomatic
+    * Is: symptomatic   
     * Q: quarantined
 
     ...
@@ -3151,7 +2338,7 @@ cdef class SEAIRQ_testing(stochastic_integration):
             double [:] Ni   = self.Ni
             #
             double [:,:] CM = self.CM
-            double [:,:] rates = self.rates
+            double [:] rates = self.rates
             double [:] alpha= self.alpha
             int nRpa = self.nReactions_per_agegroup
 
@@ -3613,3 +2800,1219 @@ cdef class Spp(stochastic_integration):
         param_dict = self.make_parameters_dict()
         out_dict.update(param_dict)
         return out_dict
+
+cdef class SppQ(stochastic_integration):
+    """
+    Generic user-defined epidemic model with quarantine.
+
+    ...
+
+    Parameters
+    ----------
+    model_spec: dict
+        A dictionary specifying the model. See `Examples`.
+    parameters: dict
+        A dictionary containing the model parameters.
+        All parameters can be float if not age-dependent, and np.array(M,) if age-dependent
+    M: int
+        Number of compartments of individual for each class.
+        I.e len(contactMatrix)
+    Ni: np.array(3*M, )
+        Initial number in each compartment and class
+
+    Examples
+    --------
+    An example of model_spec and parameters for SIR class with a constant influx, random testing (without false positives/negatives), and quarantine
+
+    >>> model_spec = {
+            "classes" : ["S", "I"],
+            "S" : {
+                "infection" : [ ["I", "-beta"] ]
+            },
+            "I" : {
+                "linear"    : [ ["I", "-gamma"] ],
+                "infection" : [ ["I", "beta"] ]
+            },
+            "test_pos"  : [ "p_falsepos", "p_truepos", "p_falsepos"] ,
+            "test_freq" : [ "tf", "tf", "tf"] 
+        }
+    >>> parameters = {
+            'beta': 0.1,
+            'gamma': 0.1,
+            'p_falsepos': 0
+            'p_truepos': 1
+            'tf': 1
+        }
+    """
+
+    cdef:
+        readonly double beta, gIa, gIs, fsa
+        readonly np.ndarray xt0, Ni, dxtdt, lld, CC, alpha
+        readonly int nClassU, nClassUwoN
+        readonly object testRate
+        np.ndarray parameters
+        np.ndarray constant_terms, linear_terms, infection_terms, test_pos, test_freq
+        np.ndarray _lambdas
+        list param_keys
+        dict class_index_dict
+
+    def __init__(self, model_spec, parameters, M, Ni):
+        cdef:
+            int i, m
+            int nRpa # short for number of reactions per age group
+            int nClass, nClassU, nClassUwoN, offset
+            Py_ssize_t S_index, infection_index,
+            Py_ssize_t reagent_index, product_index
+            int sign, class_index
+
+
+        self.N = np.sum(Ni)
+        self.M = M
+        self.Ni = np.array(Ni, dtype=long)
+
+        self.param_keys = list(parameters.keys())
+        res = pyross.utils.parse_model_spec(model_spec, self.param_keys)
+        self.nClass = res[0]
+        nClass = self.nClass
+        
+        self.class_index_dict = res[1]
+        self.constant_terms = res[2]
+        self.linear_terms = res[3]
+        self.infection_terms = res[4]
+        self.test_pos = res[5]
+        self.test_freq = res[6]
+        self.update_model_parameters(parameters)
+        self._lambdas = np.zeros((self.infection_terms.shape[0], M))
+        
+        if self.constant_terms.size > 0:
+            self.nClassU = self.nClass // 2 # number of unquarantined classes with constant terms
+            self.nClassUwoN = self.nClassU - 1 
+        else:
+            self.nClassU = (self.nClass - 1) // 2 # number of unquarantined classes w/o constant terms
+            self.nClassUwoN = self.nClassU
+        nClassU = self.nClassU
+        nClassUwoN = self.nClassUwoN
+            
+        
+        self.nReactions_per_agegroup = len(self.constant_terms) + \
+                    + len(self.linear_terms) * 2 + \
+                    + len(self.infection_terms) + \
+                    + nClassUwoN + 1
+        self.nReactions = self.M * self.nReactions_per_agegroup
+        self.dim_state_vec = self.nClass * self.M
+
+        self.CM    = np.zeros( (self.M, self.M), dtype=DTYPE)   # contact matrix C
+        self.testRate = None
+        self.rates = np.zeros( self.nReactions , dtype=DTYPE)  # rate vector
+        self.xt = np.zeros([self.dim_state_vec],dtype=long) # state
+        self.xtminus1 = np.zeros([self.dim_state_vec],dtype=long) # previous state
+        # (for event-driven simulations)
+
+        # Set seed for pseudo-random number generator (if provided)
+        try:
+            self.initialize_random_number_generator(
+                                  supplied_seed=parameters['seed'])
+        except KeyError:
+            self.initialize_random_number_generator()
+
+        # create vectors of change for reactions
+        self.vectors_of_change = np.zeros((self.nReactions,self.dim_state_vec),
+                                          dtype=long)
+        # self.vectors_of_change[i,j] = change in population j at reaction i
+        nRpa = self.nReactions_per_agegroup
+        S_index=self.class_index_dict['S']
+        for m in range(M):
+            #
+            if self.constant_terms.size > 0:
+                for i in range(self.constant_terms.shape[0]):
+                    #rate_index = constant_terms[i, 0]
+                    class_index = self.constant_terms[i, 1]
+                    sign = self.constant_terms[i, 2]
+                    #term = parameters[rate_index, m]*sign
+                    #
+                    self.vectors_of_change[i + m*nRpa,m + M*class_index] = sign
+                    self.vectors_of_change[i + m*nRpa,m + M*(nClassU-1)] = sign
+
+            offset = len(self.constant_terms)
+            for i in range(self.linear_terms.shape[0]):
+                #rate_index = linear_terms[i, 0]
+                reagent_index = self.linear_terms[i, 1]
+                product_index = self.linear_terms[i, 2]
+                #term = parameters[rate_index, m] * xt[m + M*reagent_index]
+                self.vectors_of_change[offset + 2*i   + m*nRpa,m + M*reagent_index] -= 1
+                self.vectors_of_change[offset + 2*i+1 + m*nRpa,m + M*(reagent_index+nClassU)] -= 1
+                if product_index != -1:
+                    self.vectors_of_change[offset + 2*i   + m*nRpa,m + M*product_index] += 1
+                    self.vectors_of_change[offset + 2*i+1 + m*nRpa,m + M*(product_index+nClassU)] += 1
+                    #dxdt[m + M*product_index] += term
+
+            offset += len(self.linear_terms) * 2
+            for i in range(self.infection_terms.shape[0]):
+                #rate_index = infection_terms[i, 0]
+                reagent_index = self.infection_terms[i, 1]
+                product_index = self.infection_terms[i, 2]
+                #term = parameters[rate_index, m] * lambdas[i, m] * xt[m+M*S_index]
+                self.vectors_of_change[offset + i + m*nRpa,m+M*S_index] -= 1
+                if product_index != -1:
+                    self.vectors_of_change[offset + i + m*nRpa,m+M*product_index] += 1
+                    
+            offset += len(self.infection_terms)
+            for i in range(nClassUwoN):
+                self.vectors_of_change[offset + i + m*nRpa, m + M*i] -= 1
+                self.vectors_of_change[offset + i + m*nRpa, m + M*(i+nClassU)] += 1
+                self.vectors_of_change[offset + i + m*nRpa, m + M*(nClass-1)] += 1
+            self.vectors_of_change[offset + nClassUwoN + m*nRpa, m + M*(nClass-1)] += 1
+
+
+
+    cdef rate_vector(self, xt, tt):
+        cdef:
+            int N=self.N, M=self.M, m, n, i, j, index, rate_index
+            long [:] Ni   = self.Ni
+            double [:] ld   = self.lld
+            double [:,:] CM = self.CM
+            double [:] rates = self.rates
+            int nRpa = self.nReactions_per_agegroup
+            int [:, :] constant_terms=self.constant_terms
+            int [:, :] linear_terms=self.linear_terms
+            int [:, :] infection_terms=self.infection_terms
+            int [:] test_pos=self.test_pos
+            int [:] test_freq=self.test_freq
+            double [:, :] parameters=self.parameters
+            double [:,:] lambdas = self._lambdas
+            long [:] Ri
+            int offset, nClass = self.nClass, nClassU = self.nClassU, nClassUwoN = self.nClassUwoN
+            int S_index=self.class_index_dict['S']
+            double TR = self.testRate(tt)
+            double Ntestpop, tau0
+
+        
+        if constant_terms.size > 0:
+            for i in range(M):
+                Ni[i] = xt[(nClassU-1)*M + i]  # update Ni
+        
+        # Compute lambda
+        for i in range(infection_terms.shape[0]):
+            infective_index = infection_terms[i, 1]
+            for m in range(M):
+                lambdas[i, m] = 0
+                for n in range(M):
+                    index = n + M*infective_index
+                    lambdas[i, m] += CM[m,n]*xt[index]/Ni[n]
+
+        # Compute non-quarantined recovered
+        Ri = Ni.copy() 
+        for m in range(M):
+            Ri[m] -= xt[(nClass-1)*M+m] # subtract total quarantined
+            for i in range(nClassUwoN):
+                Ri[m] -= xt[i*M+m] # subtract non-quarantined class
+                        
+        # Compute normalisation of testing rates
+        Ntestpop=0
+        for m in range(M):
+            for i in range(nClassUwoN):
+                Ntestpop += parameters[test_freq[i], m] * xt[i*M+m]
+            Ntestpop += parameters[test_freq[nClassUwoN], m] * Ri[m]
+        tau0 = TR / Ntestpop
+        
+
+
+
+        for m in range(M):
+            if constant_terms.size > 0:
+                for i in range(constant_terms.shape[0]):
+                    rate_index = constant_terms[i, 0]
+                    rate = parameters[rate_index, m]
+                    #
+                    rates[i + m*nRpa] = rate
+
+            offset = len(constant_terms)
+            for i in range(linear_terms.shape[0]):
+                rate_index = linear_terms[i, 0]
+                reagent_index = linear_terms[i, 1]
+                rate = parameters[rate_index, m] * xt[m + M*reagent_index]
+                rates[offset + 2*i   + m*nRpa] = rate
+                rate = parameters[rate_index, m] * xt[m + M*(reagent_index+nClassU)]
+                rates[offset + 2*i+1 + m*nRpa] = rate
+
+            offset += len(linear_terms) * 2
+            for i in range(infection_terms.shape[0]):
+                rate_index = infection_terms[i, 0]
+                rate = parameters[rate_index, m] * lambdas[i, m] * xt[m+M*S_index]
+                rates[offset + i + m*nRpa] = rate
+                
+            offset += len(self.infection_terms)
+            for i in range(nClassUwoN):
+                rate = tau0 * parameters[test_freq[i], m] * parameters[test_pos[i], m] * xt[m+M*i]
+                rates[offset + i + m*nRpa] = rate
+            rate = tau0 * parameters[test_freq[nClassUwoN], m] * parameters[test_pos[nClassUwoN], m] * Ri[m]
+            rates[offset + nClassUwoN + m*nRpa] = rate
+
+        return
+
+
+    def update_model_parameters(self, parameters):
+        nParams = len(self.param_keys)
+        self.parameters = np.empty((nParams, self.M), dtype=DTYPE)
+        try:
+            for (i, key) in enumerate(self.param_keys):
+                param = parameters[key]
+                self.parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
+        except KeyError:
+            raise Exception('The parameters passed does not contain certain keys. The keys are {}'.format(self.param_keys))
+
+    cpdef set_testRate(self, testRate):
+        self.testRate = testRate
+
+    def make_parameters_dict(self):
+        param_dict = {k:self.parameters[i] for (i, k) in enumerate(self.param_keys)}
+        return param_dict
+    
+
+    def model_class_data(self, model_class_key, data):
+        """
+        Parameters
+        ----------
+        data: dict
+            The object returned by `simulate`.
+
+        Returns
+        -------
+            The population of class `model_class_key` as a time series
+        """
+        X = data['X']
+
+        if model_class_key == 'R':
+            X_reshaped = X.reshape((X.shape[0], (self.nClass), self.M))
+            if self.constant_terms.size > 0:
+                Os = X_reshaped[:,(self.nClassU-1),:] - X_reshaped[:,(self.nClass-1),:] - np.sum(X_reshaped[:,0:(self.nClassU-1),:], axis=1)
+            else:
+                Os = self.Ni - X_reshaped[:,-1,:] - np.sum(X_reshaped[:,0:self.nClassU,:], axis=1)
+        elif model_class_key == 'RQ':
+            X_reshaped = X.reshape((X.shape[0], (self.nClass), self.M))
+            Os = X_reshaped[:,(self.nClass-1),:] - np.sum(X_reshaped[:,(self.nClassU):(self.nClass-1),:], axis=1)
+        else:
+            class_index = self.class_index_dict[model_class_key]
+            Os = X[:, class_index*self.M:(class_index+1)*self.M]
+        return Os
+
+
+
+    cpdef simulate(self, x0, contactMatrix, testRate, Tf, Nf,
+                method='gillespie',
+                int nc=30, double epsilon = 0.03,
+                int tau_update_frequency = 1,
+                ):
+        """
+        Performs the Stochastic Simulation Algorithm (SSA)
+
+        Parameters
+        ----------
+        x0: np.array
+            Initial condition.
+        contactMatrix: python function(t)
+            The social contact matrix C_{ij} denotes the
+            average number of contacts made per day by an
+            individual in class i with an individual in class j
+        testRate: python function(t)
+            The total number of PCR tests performed per day
+        Tf: float
+            Final time of integrator
+        Nf: Int
+            Number of time points to evaluate.
+        method: str, optional
+            SSA to use, either 'gillespie' or 'tau_leaping'.
+            The default is 'gillespie'.
+        nc: TYPE, optional
+        epsilon: TYPE, optional
+        tau_update_frequency: TYPE, optional
+
+        Returns
+        -------
+        dict
+             X: output path from integrator,  t : time points evaluated at,
+            'event_occured' , 'param': input param to integrator.
+
+        """
+        cdef:
+            int M = self.M, i, n_class_for_init
+            long [:] xt = self.xt
+            list class_list, skipped_classes
+            dict param_dict
+        
+        if type(x0) == list:
+            x0 = np.array(x0)
+
+        if type(x0) == np.ndarray:
+
+            n_class_for_init = self.nClass
+            if self.constant_terms.size > 0:
+                n_class_for_init -= 1
+            if x0.size != n_class_for_init*M:
+                raise Exception("Initial condition x0 has the wrong dimensions. Expected x0.size=%s."
+                    % ( n_class_for_init*M) )
+        elif type(x0) == dict:
+            # Check if any classes are not included in x0
+
+            class_list = list(self.class_index_dict.keys())
+            if self.constant_terms.size > 0:
+                class_list.remove('Ni')
+
+            skipped_classes = []
+            for O in class_list:
+                if not O in x0:
+                    skipped_classes.append(O)
+            if len(skipped_classes) > 0:
+                raise Exception("Missing classes in initial conditions: %s" % skipped_classes)
+
+
+            # Construct initial condition array
+            x0_arr = np.zeros(0)
+
+            for O in class_list:
+                x0_arr = np.concatenate( [x0_arr, x0[O]] )
+            x0 = x0_arr
+
+        if self.constant_terms.size == 0:
+            for i in range(len(x0)):
+                xt[i] = x0[i]
+        else: # add Ni to x0
+            for i in range((self.nClassU-1)*M):
+                xt[i] = x0[i]
+            for i in range(M):
+                xt[i+(self.nClassU-1)*M] = self.Ni[i]
+            for i in range((self.nClassU-1)*M, len(x0)):
+                xt[i+M] = x0[i]
+
+        self.testRate = testRate
+            
+        if method.lower() == 'gillespie':
+            t_arr, out_arr =  self.simulate_gillespie(contactMatrix=contactMatrix,
+                                     Tf= Tf, Nf= Nf)
+        else:
+            t_arr, out_arr =  self.simulate_tau_leaping(contactMatrix=contactMatrix,
+                                  Tf=Tf, Nf=Nf,
+                                  nc=nc,
+                                  epsilon= epsilon,
+                                  tau_update_frequency=tau_update_frequency)
+
+        out_dict = {'X':out_arr, 't':t_arr,
+                     'Ni':self.Ni, 'M':self.M}
+        param_dict = self.make_parameters_dict()
+        out_dict.update(param_dict)
+        return out_dict 
+
+
+
+
+
+
+
+
+cdef class SEI5R(stochastic_integration):
+    warnings.warn('SEI5R not supported', DeprecationWarning)
+    """
+    Susceptible, Exposed, Infected, Removed (SEIR)
+    The infected class has 5 groups:
+    * Ia: asymptomatic
+    * Is: symptomatic
+    * Ih: hospitalized
+    * Ic: ICU
+    * Im: Mortality
+    ...
+    Parameters
+    ----------
+     parameters: dict
+        Contains the following keys:
+        alpha: float, np.array (M,)
+            fraction of infected who are asymptomatic.
+        beta: float
+            rate of spread of infection.
+        gE: float
+            rate of removal from exposeds individuals.
+        gIa: float
+            rate of removal from asymptomatic individuals.
+        gIs: float
+            rate of removal from symptomatic individuals.
+        gIh: float
+            rate of removal for hospitalised individuals.
+        gIc: float
+            rate of removal for idividuals in intensive care.
+        fsa: float
+            fraction by which symptomatic individuals self isolate.
+        fh  : float
+            fraction by which hospitalised individuals are isolated.
+        sa: float, np.array (M,)
+            daily arrival of new susceptables.
+            sa is rate of additional/removal of population by birth etc
+        hh: float, np.array (M,)
+            fraction hospitalised from Is
+        cc: float, np.array (M,)
+            fraction sent to intensive care from hospitalised.
+        mm: float, np.array (M,)
+            mortality rate in intensive care
+        seed: long
+            seed for pseudo-random number generator (optional).
+    M: int
+        Number of compartments of individual for each class.
+        I.e len(contactMatrix)
+    Ni: np.array(8*M, )
+        Initial number in each compartment and class
+    """
+
+    cdef:
+        readonly double beta, gE, gIa, gIs, gIh, gIc, fsa, fh
+        readonly np.ndarray xt0, Ni, dxtdt, CC, sa, iaa, hh, cc, mm, alpha, population
+        int nClass_
+
+    def __init__(self, parameters, M, Ni):
+        cdef:
+            int nRpa # short for number of reactions per age group
+
+        alpha      = parameters['alpha']                    # fraction of asymptomatic infectives
+        self.beta  = parameters['beta']                     # infection rate
+        self.gE    = parameters['gE']                       # removal rate of E class
+        self.gIa   = parameters['gIa']                      # removal rate of Ia
+        self.gIs   = parameters['gIs']                      # removal rate of Is
+        self.gIh   = parameters['gIh']                      # removal rate of Is
+        self.gIc   = parameters['gIc']                      # removal rate of Is
+        self.fsa   = parameters['fsa']                      # the self-isolation parameter of symptomatics
+        self.fh    = parameters['fh']                       # the self-isolation parameter of hospitalizeds
+
+        sa         = parameters['sa']                       # daily arrival of new susceptibles
+        hh         = parameters['hh']                       # hospital
+        cc         = parameters['cc']                       # ICU
+        mm         = parameters['mm']                       # mortality
+        iaa        = parameters['iaa']                      # daily arrival of new asymptomatics
+
+        self.N     = np.sum(Ni)
+        self.M     = M
+        self.Ni    = np.zeros( self.M, dtype=DTYPE)             # # people in each age-group
+        self.Ni    = np.array(Ni.copy(),dtype=long)
+
+        self.nClass = 7  # number of classes (used in unit tests)
+        self.nClass_ = 8 # number of explicit classes used in this function
+        # explicit states per age group:
+        # 1. S    susceptibles
+        # 2. E    exposed
+        # 3. Ia   infectives, asymptomatic
+        # 4. Is   infectives, symptomatic
+        # 5. Ih   infectives, hospitalised
+        # 6. Ic   infectives, in ICU
+        # 7. Im   infectives, deceased
+        # 8. R    Removed
+
+        self.nReactions_per_agegroup = 11
+        self.nReactions = self.M * self.nReactions_per_agegroup
+        self.dim_state_vec = self.nClass_ * self.M
+
+        self.CM    = np.zeros( (self.M, self.M), dtype=DTYPE)   # contact matrix C
+        self.rates = np.zeros( self.nReactions , dtype=DTYPE)  # rate matrix
+        self.xt = np.zeros([self.dim_state_vec],dtype=long) # state
+        self.xtminus1 = np.zeros([self.dim_state_vec],dtype=long) # previous state
+        # (for event-driven simulations)
+
+        self.alpha = np.zeros( self.M, dtype = DTYPE)
+        if np.size(alpha)==1:
+            self.alpha = alpha*np.ones(M)
+        elif np.size(alpha)==M:
+            self.alpha= alpha
+        else:
+            raise Exception('alpha can be a number or an array of size M')
+
+        self.sa    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(sa)==1:
+            self.sa = sa*np.ones(M)
+        elif np.size(sa)==M:
+            self.sa= sa
+        else:
+            print('sa can be a number or an array of size M')
+
+        self.hh    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(hh)==1:
+            self.hh = hh*np.ones(M)
+        elif np.size(hh)==M:
+            self.hh= hh
+        else:
+            print('hh can be a number or an array of size M')
+
+        self.cc    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(cc)==1:
+            self.cc = cc*np.ones(M)
+        elif np.size(cc)==M:
+            self.cc= cc
+        else:
+            print('cc can be a number or an array of size M')
+
+        self.mm    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(mm)==1:
+            self.mm = mm*np.ones(M)
+        elif np.size(mm)==M:
+            self.mm= mm
+        else:
+            print('mm can be a number or an array of size M')
+
+        self.iaa    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(iaa)==1:
+            self.iaa = iaa*np.ones(M)
+        elif np.size(iaa)==M:
+            self.iaa = iaa
+        else:
+            print('iaa can be a number or an array of size M')
+
+        # Set seed for pseudo-random number generator (if provided)
+        try:
+            self.initialize_random_number_generator(
+                                  supplied_seed=parameters['seed'])
+        except KeyError:
+            self.initialize_random_number_generator()
+
+        # create vectors of change for reactions
+        self.vectors_of_change = np.zeros((self.nReactions,self.dim_state_vec),
+                                          dtype=long)
+        # self.vectors_of_change[i,j] = change in population j at reaction i
+        nRpa = self.nReactions_per_agegroup
+        for i in range(M):
+            # birth rate
+            # population of S increases by 1
+            self.vectors_of_change[  i*nRpa,i    ] = +1
+            #
+            # reaction S -> E at age group i:
+            # population of S decreases by 1, population of E increases by 1
+            self.vectors_of_change[1+i*nRpa,i    ] = -1
+            self.vectors_of_change[1+i*nRpa,i+  M] = +1
+            #
+            # reaction E -> Ia at age group i:
+            # population of E decreases by 1, population of Ia increases by 1
+            self.vectors_of_change[2+i*nRpa,i+  M] = -1
+            self.vectors_of_change[2+i*nRpa,i+2*M] = +1
+            #
+            # reaction E -> Is at age group i:
+            # population of E decreases by 1, population of Is increases by 1
+            self.vectors_of_change[3+i*nRpa,i+  M] = -1
+            self.vectors_of_change[3+i*nRpa,i+3*M] = +1
+            #
+            # reaction Ia -> R at age group i:
+            # population of Ia decreases by 1, population of R increases by 1
+            self.vectors_of_change[4+i*nRpa,i+2*M] = -1
+            self.vectors_of_change[4+i*nRpa,i+7*M] = +1
+            #
+            # reaction Is -> R at age group i:
+            # population of Is decreases by 1, population of R increases by 1
+            self.vectors_of_change[5+i*nRpa,i+3*M] = -1
+            self.vectors_of_change[5+i*nRpa,i+7*M] = +1
+            #
+            # reaction Is -> Ih at age group i:
+            self.vectors_of_change[6+i*nRpa,i+3*M] = -1
+            self.vectors_of_change[6+i*nRpa,i+4*M] = +1
+            #
+            # reaction Ih -> R at age group i:
+            self.vectors_of_change[7+i*nRpa,i+4*M] = -1
+            self.vectors_of_change[7+i*nRpa,i+7*M] = +1
+            #
+            # reaction Ih -> Ic at age group i:
+            self.vectors_of_change[8+i*nRpa,i+4*M] = -1
+            self.vectors_of_change[8+i*nRpa,i+5*M] = +1
+            #
+            # reaction Ic -> R at age group i:
+            self.vectors_of_change[9+i*nRpa,i+5*M] = -1
+            self.vectors_of_change[9+i*nRpa,i+7*M] = +1
+            #
+            # reaction Ic -> Im at age group i:
+            self.vectors_of_change[10+i*nRpa,i+5*M] = -1
+            self.vectors_of_change[10+i*nRpa,i+6*M] = +1
+
+        self.readData = {'Ei':[1,2], 'Iai':[2,3],
+                        'Isi':[3,4],
+                        'Ihi':[4,5],
+                        'Ici':[5,6],
+                        'Imi':[6,7], 'Rind':6}
+
+    cdef rate_vector(self, xt, tt):
+        cdef:
+            int N=self.N, M=self.M, i, j
+            double beta=self.beta, rateS, lmda
+            double fsa=self.fsa, fh=self.fh,  gE=self.gE
+            double gIs=self.gIs, gIa=self.gIa, gIh=self.gIh, gIc=self.gIh
+            double ce1, ce2
+            #
+            long [:] S    = xt[0  :M]
+            long [:] E    = xt[M  :2*M]
+            long [:] Ia   = xt[2*M:3*M]
+            long [:] Is   = xt[3*M:4*M]
+            long [:] Ih   = xt[4*M:5*M]
+            long [:] Ic   = xt[5*M:6*M]
+            long [:] Im   = xt[6*M:7*M]
+            long [:] R    = xt[7*M:8*M]
+            #
+            long [:] Ni    = self.Ni
+            #
+            double [:] alpha= self.alpha
+            double [:] sa   = self.sa
+            double [:] iaa  = self.iaa
+            double [:] hh   = self.hh
+            double [:] cc   = self.cc
+            double [:] mm   = self.mm
+            #
+            double [:,:] CM = self.CM
+            double [:] rates = self.rates
+            int nRpa = self.nReactions_per_agegroup
+
+        # update Ni
+        for i in range(M):
+            Ni[i] = S[i] + E[i] + Ia[i] + Is[i] + Ih[i] + Ic[i] + R[i]
+
+        for i in range(M):
+            lmda=0;   ce1=gE*alpha[i];  ce2=gE-ce1
+            for j in range(M):
+                lmda += beta*CM[i,j]*(Ia[j]+fsa*Is[j]+fh*Ih[j])/Ni[j]
+            rateS = lmda*S[i]
+            #
+            rates[  i*nRpa]  = sa[i] # birth rate
+            rates[1+i*nRpa]  =  rateS  # rate S -> E
+            rates[2+i*nRpa]  = ce1 * E[i] # rate E -> Ia
+            rates[3+i*nRpa]  = ce2 * E[i] # rate E -> Is
+            #
+            rates[4+i*nRpa]  = gIa * Ia[i] # rate Ia -> R
+            #
+            rates[5+i*nRpa]  = (1.-hh[i])*gIs * Is[i] # rate Is -> R
+            rates[6+i*nRpa]  = hh[i]*gIs * Is[i] # rate Is -> Ih
+            #
+            rates[7+i*nRpa]  = (1.-cc[i])*gIh * Ih[i] # rate Ih -> R
+            rates[8+i*nRpa]  = cc[i]*gIh * Ih[i] # rate Ih -> Ic
+            #
+            rates[9+i*nRpa]  = (1.-mm[i])*gIc * Ic[i] # rate Ic -> R
+            rates[10+i*nRpa] = mm[i]*gIc * Ic[i] # rate Ic -> Im
+            #
+        return
+
+
+    cpdef simulate(self, S0, E0, Ia0, Is0, Ih0, Ic0, Im0,
+                  contactMatrix, Tf, Nf,
+                method='gillespie',
+                int nc=30, double epsilon = 0.03,
+                int tau_update_frequency = 1,
+                ):
+        cdef:
+            int M = self.M, i
+            long [:] xt = self.xt
+
+        # write initial condition to xt
+        for i in range(M):
+            xt[i] = S0[i]
+            xt[i+M] = E0[i]
+            xt[i+2*M] = Ia0[i]
+            xt[i+3*M] = Is0[i]
+            xt[i+4*M] = Ih0[i]
+            xt[i+5*M] = Ic0[i]
+            xt[i+6*M] = Im0[i]
+            xt[i+7*M] = self.Ni[i] - S0[i] - E0[i] - Ia0[i] - Is0[i] \
+                                   - Ih0[i] - Ic0[i] - Im0[i]
+            if xt[i+7*M] < 0:
+                xt[i+7*M] = 0
+                # It is probably better to have the error message below,
+                # to warn the user if their input numbers do not match?
+                #raise RuntimeError("Sum of provided initial populations for class" + \
+                #    " {0} exceeds total initial population for that class\n".format(i) + \
+                #    " {0} > {1}".format(xt[i+7*M],self.Ni[i]))
+
+        if method.lower() == 'gillespie':
+            t_arr, out_arr =  self.simulate_gillespie(contactMatrix, Tf, Nf)
+        else:
+            t_arr, out_arr =  self.simulate_tau_leaping(contactMatrix, Tf, Nf,
+                                  nc=nc,
+                                  epsilon= epsilon,
+                                  tau_update_frequency=tau_update_frequency)
+        # Instead of the removed population, which is stored in the last compartment,
+        # we want to output the total alive population (whose knowledge is mathematically
+        # equivalent to knowing the removed population).
+        for i in range(M):
+            out_arr[:,i+7*M] += out_arr[:,i+5*M] + out_arr[:,i+4*M] + out_arr[:,i+3*M]
+            out_arr[:,i+7*M] += out_arr[:,i+2*M] + out_arr[:,i+1*M] + out_arr[:,i+0*M]
+
+
+        out_dict = {'X':out_arr, 't':t_arr,
+                      'Ni':self.Ni, 'M':self.M,
+                      'alpha':self.alpha, 'beta':self.beta,
+                      'gIa':self.gIa,'gIs':self.gIs,
+                      'gIh':self.gIh,'gIc':self.gIc,
+                      'fsa':self.fsa,'fh':self.fh,
+                      'gE':self.gE,
+                      'sa':self.sa,'hh':self.hh,
+                      'mm':self.mm,'cc':self.cc,
+                      'iaa':self.iaa,
+                      }
+        self.population = (out_dict['X'])[:,7*self.M:8*self.M]
+        return out_dict
+
+
+    cpdef simulate_events(self, S0, E0, Ia0, Is0, Ih0, Ic0, Im0,
+                events, contactMatrices, Tf, Nf,
+                method='gillespie',
+                int nc=30, double epsilon = 0.03,
+                int tau_update_frequency = 1,
+                  events_repeat=False,events_subsequent=True,
+                  stop_at_event=False,
+                ):
+        cdef:
+            int M = self.M, i
+            long [:] xt = self.xt
+            list events_out
+            np.ndarray out_arr, t_arr
+
+        # write initial condition to xt
+        for i in range(M):
+            xt[i] = S0[i]
+            xt[i+M] = E0[i]
+            xt[i+2*M] = Ia0[i]
+            xt[i+3*M] = Is0[i]
+            xt[i+4*M] = Ih0[i]
+            xt[i+5*M] = Ic0[i]
+            xt[i+6*M] = Im0[i]
+            xt[i+7*M] = self.Ni[i] - S0[i] - E0[i] - Ia0[i] - Is0[i]
+            xt[i+7*M] -= Ih0[i] + Ic0[i] + Im0[i]
+            if xt[i+7*M] < 0:
+                xt[i+7*M] = 0
+                # It is probably better to have the error message below,
+                # to warn the user if their input numbers do not match?
+                #raise RuntimeError("Sum of provided initial populations for class" + \
+                #    " {0} exceeds total initial population for that class\n".format(i) + \
+                #    " {0} > {1}".format(xt[i+7*M],self.Ni[i]))
+
+        if method.lower() == 'gillespie':
+            t_arr, out_arr, events_out =  self.simulate_gillespie_events(events=events,
+                                  contactMatrices=contactMatrices,
+                                  Tf=Tf, Nf=Nf,
+                                  events_repeat=events_repeat,
+                                  events_subsequent=events_subsequent,
+                                  stop_at_event=stop_at_event)
+        else:
+            t_arr, out_arr, events_out =  self.simulate_tau_leaping_events(events=events,
+                                  contactMatrices=contactMatrices,
+                                  Tf=Tf, Nf=Nf,
+                                  nc=nc,
+                                  epsilon= epsilon,
+                                  tau_update_frequency=tau_update_frequency,
+                                  events_repeat=events_repeat,
+                                  events_subsequent=events_subsequent,
+                                  stop_at_event=stop_at_event)
+
+        out_dict = {'X':out_arr, 't':t_arr,  'events_occured':events_out,
+                    'Ni':self.Ni, 'M':self.M,
+                    'alpha':self.alpha, 'beta':self.beta,
+                    'gIa':self.gIa,'gIs':self.gIs,
+                    'gIh':self.gIh,'gIc':self.gIc,
+                    'fsa':self.fsa,'fh':self.fh,
+                    'gE':self.gE,
+                    'sa':self.sa,'hh':self.hh,
+                    'mm':self.mm,'cc':self.cc,
+                    'iaa':self.iaa,
+                    }
+
+        self.population = (out_dict['X'])[:,7*self.M:8*self.M]
+        return out_dict
+
+
+
+
+cdef class SEAI5R(stochastic_integration):
+    warnings.warn('SEAI5R not supported', DeprecationWarning)
+    """
+    Susceptible, Exposed, Activates, Infected, Removed (SEAIR)
+    The infected class has 5 groups:
+    * Ia: asymptomatic
+    * Is: symptomatic
+    * Ih: hospitalized
+    * Ic: ICU
+    * Im: Mortality
+    ...
+    Parameters
+    ----------
+    parameters: dict
+        Contains the following keys:
+        alpha: float, np.array (M,)
+            fraction of infected who are asymptomatic.
+        beta: float
+            rate of spread of infection.
+        gIa: float
+            rate of removal from asymptomatic individuals.
+        gIs: float
+            rate of removal from symptomatic individuals.
+        fsa: float
+            fraction by which symptomatic individuals self isolate.
+        gE: float
+            rate of removal from exposeds individuals.
+        gA: float
+            rate of removal from activated individuals.
+        gIh: float
+            rate of hospitalisation of infected individuals.
+        gIc: float
+            rate hospitalised individuals are moved to intensive care.
+        seed: long
+            seed for pseudo-random number generator (optional).
+    M: int
+        Number of compartments of individual for each class.
+        I.e len(contactMatrix)
+    Ni: np.array(9*M, )
+        Initial number in each compartment and class.
+    """
+
+    cdef:
+        readonly double beta, gE, gA, gIa, gIs, gIh, gIc, fsa, fh
+        readonly np.ndarray xt0, Ni, dxtdt, CC, sa, hh, cc, mm, alpha, population
+        int nClass_
+
+    def __init__(self, parameters, M, Ni):
+        cdef:
+            int nRpa # short for number of reactions per age group
+
+        alpha      = parameters['alpha']                    # fraction of asymptomatic infectives
+        self.beta  = parameters['beta']                     # infection rate
+        self.gE    = parameters['gE']                       # progression rate of E class
+        self.gA    = parameters['gA']                       # progression rate of A class
+        self.gIa   = parameters['gIa']                      # removal rate of Ia
+        self.gIs   = parameters['gIs']                      # removal rate of Is
+        self.gIh   = parameters['gIh']                      # removal rate of Ih
+        self.gIc   = parameters['gIc']                      # removal rate of Ic
+        self.fsa   = parameters['fsa']                      # the self-isolation parameter of symptomatics
+        self.fh    = parameters['fh']                       # the self-isolation parameter of hospitalizeds
+
+        sa         = parameters['sa']                       # daily arrival of new susceptibles
+        hh         = parameters['hh']                       # hospital
+        cc         = parameters['cc']                       # ICU
+        mm         = parameters['mm']                       # mortality
+        #iaa        = parameters['iaa')                      # daily arrival of new asymptomatics
+
+        self.N     = np.sum(Ni)
+        self.M     = M
+        #self.Ni    = np.zeros( self.M, dtype=DTYPE)             # # people in each age-group
+        self.Ni    = np.array( Ni.copy(), dtype=long)
+
+        self.nClass = 8  # number of classes (used in unit tests)
+        self.nClass_ = 9 # number of explicit classes used in this function
+        # explicit states per age group:
+        # 1. S    susceptibles
+        # 2. E    exposed
+        # 3. A    Asymptomatic and infected
+        # 4. Ia   infectives, asymptomatic
+        # 5. Is   infectives, symptomatic
+        # 6. Ih   infectives, hospitalised
+        # 7. Ic   infectives, in ICU
+        # 8. Im   infectives, deceased
+        # 9. R    removed
+
+        self.nReactions_per_agegroup = 12
+        self.nReactions = self.M * self.nReactions_per_agegroup
+        self.dim_state_vec = self.nClass_ * self.M
+
+        self.CM    = np.zeros( (self.M, self.M), dtype=DTYPE)   # contact matrix C
+        self.rates = np.zeros( self.nReactions , dtype=DTYPE)  # rate matrix
+        self.xt = np.zeros([self.dim_state_vec],dtype=long) # state
+        self.xtminus1 = np.zeros([self.dim_state_vec],dtype=long) # previous state
+        # (for event-driven simulations)
+
+        self.alpha    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(alpha)==1:
+            self.alpha = alpha*np.ones(M)
+        elif np.size(alpha)==M:
+            self.alpha= alpha
+        else:
+            raise Exception('alpha can be a number or an array of size M')
+
+        self.sa    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(sa)==1:
+            self.sa = sa*np.ones(M)
+        elif np.size(sa)==M:
+            self.sa= sa
+        else:
+            print('sa can be a number or an array of size M')
+
+        self.hh    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(hh)==1:
+            self.hh = hh*np.ones(M)
+        elif np.size(hh)==M:
+            self.hh= hh
+        else:
+            print('hh can be a number or an array of size M')
+
+        self.cc    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(cc)==1:
+            self.cc = cc*np.ones(M)
+        elif np.size(cc)==M:
+            self.cc= cc
+        else:
+            print('cc can be a number or an array of size M')
+
+        self.mm    = np.zeros( self.M, dtype = DTYPE)
+        if np.size(mm)==1:
+            self.mm = mm*np.ones(M)
+        elif np.size(mm)==M:
+            self.mm= mm
+        else:
+            print('mm can be a number or an array of size M')
+
+        # Set seed for pseudo-random number generator (if provided)
+        try:
+            self.initialize_random_number_generator(
+                                  supplied_seed=parameters['seed'])
+        except KeyError:
+            self.initialize_random_number_generator()
+
+        # create vectors of change for reactions
+        self.vectors_of_change = np.zeros((self.nReactions,self.dim_state_vec),
+                                          dtype=long)
+        # self.vectors_of_change[i,j] = change in population j at reaction i
+        nRpa = self.nReactions_per_agegroup
+        for i in range(M):
+            # birth rate
+            # population of S increases by 1
+            self.vectors_of_change[  i*nRpa,i    ] = +1
+            #
+            # reaction S -> E at age group i:
+            # population of S decreases by 1, population of E increases by 1
+            self.vectors_of_change[1+i*nRpa,i    ] = -1
+            self.vectors_of_change[1+i*nRpa,i+  M] = +1
+            #
+            # reaction E -> A at age group i:
+            # population of E decreases by 1, population of A increases by 1
+            self.vectors_of_change[2+i*nRpa,i+  M] = -1
+            self.vectors_of_change[2+i*nRpa,i+2*M] = +1
+            #
+            # reaction A -> Ia at age group i:
+            # population of A decreases by 1, population of Ia increases by 1
+            self.vectors_of_change[3+i*nRpa,i+2*M] = -1
+            self.vectors_of_change[3+i*nRpa,i+3*M] = +1
+            #
+            # reaction A -> Is at age group i:
+            # population of E decreases by 1, population of Is increases by 1
+            self.vectors_of_change[4+i*nRpa,i+2*M] = -1
+            self.vectors_of_change[4+i*nRpa,i+4*M] = +1
+            #
+            # reaction Ia -> R at age group i:
+            # population of Ia decreases by 1, population of R increases by 1
+            self.vectors_of_change[5+i*nRpa,i+3*M] = -1
+            self.vectors_of_change[5+i*nRpa,i+8*M] = +1
+            #
+            # reaction Is -> R at age group i:
+            # population of Is decreases by 1, population of R increases by 1
+            self.vectors_of_change[6+i*nRpa,i+4*M] = -1
+            self.vectors_of_change[6+i*nRpa,i+8*M] = +1
+            #
+            # reaction Is -> Ih at age group i:
+            self.vectors_of_change[7+i*nRpa,i+4*M] = -1
+            self.vectors_of_change[7+i*nRpa,i+5*M] = +1
+            #
+            # reaction Ih -> R at age group i:
+            self.vectors_of_change[8+i*nRpa,i+5*M] = -1
+            self.vectors_of_change[8+i*nRpa,i+8*M] = +1
+            #
+            # reaction Ih -> Ic at age group i:
+            self.vectors_of_change[9+i*nRpa,i+5*M] = -1
+            self.vectors_of_change[9+i*nRpa,i+6*M] = +1
+            #
+            # reaction Ic -> R at age group i:
+            self.vectors_of_change[10+i*nRpa,i+6*M] = -1
+            self.vectors_of_change[10+i*nRpa,i+8*M] = +1
+            #
+            # reaction Ic -> Im at age group i:
+            self.vectors_of_change[11+i*nRpa,i+6*M] = -1
+            self.vectors_of_change[11+i*nRpa,i+7*M] = +1
+
+        self.readData = {'Ei':[1,2], 'Ai':[2,3], 'Iai':[3,4],
+                        'Isi':[4,5],
+                        'Ihi':[5,6],
+                        'Ici':[6,7],
+                        'Imi':[7,8], 'Rind':7}
+
+    cdef rate_vector(self, xt, tt):
+        cdef:
+            int N=self.N, M=self.M, i, j
+            double beta=self.beta, rateS, lmda
+            double fsa=self.fsa, fh=self.fh, gE=self.gE,  gA=self.gA
+            double gIs=self.gIs, gIa=self.gIa, gIh=self.gIh, gIc=self.gIh
+            double gAA, gAS
+            #
+            long [:] S    = xt[0  :  M]
+            long [:] E    = xt[M  :2*M]
+            long [:] A    = xt[2*M:3*M]
+            long [:] Ia   = xt[3*M:4*M]
+            long [:] Is   = xt[4*M:5*M]
+            long [:] Ih   = xt[5*M:6*M]
+            long [:] Ic   = xt[6*M:7*M]
+            long [:] Im   = xt[7*M:8*M]
+            long [:] R    = xt[8*M:9*M]
+            #
+            long [:] Ni    = self.Ni
+            #
+            double [:] alpha= self.alpha
+            double [:] sa   = self.sa
+            double [:] hh   = self.hh
+            double [:] cc   = self.cc
+            double [:] mm   = self.mm
+            #
+            double [:,:] CM = self.CM
+            double [:] rates = self.rates
+            int nRpa = self.nReactions_per_agegroup
+
+        # update Ni
+        for i in range(M):
+            Ni[i] = S[i] + E[i] + A[i] + Ia[i] + Is[i] + Ih[i] + Ic[i] + R[i]
+
+        for i in range(M):
+            lmda=0;   gAA=gA*alpha[i];  gAS=gA-gAA
+            for j in range(M):
+                lmda += beta*CM[i,j]*(A[j] + Ia[j]+fsa*Is[j]+fh*Ih[j])/Ni[j]
+            rateS = lmda*S[i]
+            #
+            # rates from S
+            rates[  i*nRpa]  = sa[i] # birth rate
+            rates[1+i*nRpa]  = rateS  # rate S -> E
+            # rates from E
+            rates[2+i*nRpa]  = gE * E[i] # rate E -> A
+            # rates from A
+            rates[3+i*nRpa]  = gAA * A[i] # rate A -> Ia
+            rates[4+i*nRpa]  = gAS * A[i] # rate A -> Is
+            # rates from Ia
+            rates[5+i*nRpa]  = gIa * Ia[i] # rate Ia -> R
+            # rates from Is
+            rates[6+i*nRpa]  = (1.-hh[i])*gIs * Is[i] # rate Is -> R
+            rates[7+i*nRpa]  = hh[i]*gIs * Is[i] # rate Is -> Ih
+            # rate from Ih
+            rates[8+i*nRpa]  = (1.-cc[i])*gIh * Ih[i] # rate Ih -> R
+            rates[9+i*nRpa]  = cc[i]*gIh * Ih[i] # rate Ih -> Ic
+            # rates from Ic
+            rates[10+i*nRpa]  = (1.-mm[i])*gIc * Ic[i] # rate Ic -> R
+            rates[11+i*nRpa]  = mm[i]*gIc * Ic[i] # rate Ic -> Im
+            #
+        return
+
+
+    cpdef simulate(self, S0, E0, A0, Ia0, Is0, Ih0, Ic0, Im0,
+                  contactMatrix, Tf, Nf,
+                method='gillespie',
+                int nc=30, double epsilon = 0.03,
+                int tau_update_frequency = 1,
+                ):
+        cdef:
+            int M = self.M, i
+            long [:] xt = self.xt
+
+        R_0 = self.Ni-(S0+E0+A0+Ia0+Is0+Ih0+Ic0)
+        # write initial condition to xt
+        for i in range(M):
+            xt[i] = S0[i]
+            xt[i+M] = E0[i]
+            xt[i+2*M] = A0[i]
+            xt[i+3*M] = Ia0[i]
+            xt[i+4*M] = Is0[i]
+            xt[i+5*M] = Ih0[i]
+            xt[i+6*M] = Ic0[i]
+            xt[i+7*M] = Im0[i]
+            xt[i+8*M] = R_0[i]
+            #print(xt[i+7*M])
+            if xt[i+8*M] < 0:
+                raise RuntimeError("Sum of provided initial populations for class" + \
+                    " {0} exceeds total initial population for that class\n".format(i) + \
+                    " {0} > {1}".format(xt[i+8*M],self.Ni[i]))
+        if method.lower() == 'gillespie':
+            t_arr, out_arr =  self.simulate_gillespie(contactMatrix, Tf, Nf)
+        else:
+            t_arr, out_arr =  self.simulate_tau_leaping(contactMatrix, Tf, Nf,
+                                  nc=nc,
+                                  epsilon= epsilon,
+                                  tau_update_frequency=tau_update_frequency)
+        # Instead of the removed population, which is stored in the last compartment,
+        # we want to output the total alive population (whose knowledge is mathematically
+        # equivalent to knowing the removed population).
+        for i in range(M):
+            out_arr[:,i+8*M] += out_arr[:,i+6*M]
+            out_arr[:,i+8*M] += out_arr[:,i+5*M] + out_arr[:,i+4*M] + out_arr[:,i+3*M]
+            out_arr[:,i+8*M] += out_arr[:,i+2*M] + out_arr[:,i+1*M] + out_arr[:,i]
+
+        out_dict = {'X':out_arr, 't':t_arr,
+                      'Ni':self.Ni, 'M':self.M,
+                      'alpha':self.alpha, 'beta':self.beta,
+                      'gIa':self.gIa,'gIs':self.gIs,
+                      'gIh':self.gIh,'gIc':self.gIc,
+                      'fsa':self.fsa,'fh':self.fh,
+                      'gE':self.gE,'gA':self.gA,
+                      'sa':self.sa,'hh':self.hh,
+                      'mm':self.mm,'cc':self.cc,
+                      #'iaa':self.iaa,
+                      }
+        self.population = (out_dict['X'])[:,8*self.M:9*self.M]
+        return out_dict
+
+
+
+    cpdef simulate_events(self, S0, E0, A0, Ia0, Is0, Ih0, Ic0, Im0,
+                events, contactMatrices, Tf, Nf,
+                method='gillespie',
+                int nc=30, double epsilon = 0.03,
+                int tau_update_frequency = 1,
+                  events_repeat=False,events_subsequent=True,
+                  stop_at_event=False,
+                ):
+        cdef:
+            int M = self.M, i
+            long [:] xt = self.xt
+            list events_out
+            np.ndarray out_arr, t_arr
+
+        # write initial condition to xt
+        for i in range(M):
+            xt[i] = S0[i]
+            xt[i+M] = E0[i]
+            xt[i+2*M] = A0[i]
+            xt[i+3*M] = Ia0[i]
+            xt[i+4*M] = Is0[i]
+            xt[i+5*M] = Ih0[i]
+            xt[i+6*M] = Ic0[i]
+            xt[i+7*M] = Im0[i]
+            xt[i+8*M] = self.Ni[i] - S0[i] - E0[i] - A0[i] - Ia0[i] - Is0[i]
+            xt[i+8*M] -= Ih0[i] + Ic0[i] + Im0[i]
+            #print(xt[i+7*M])
+            if xt[i+8*M] < 0:
+                raise RuntimeError("Sum of provided initial populations for class" + \
+                    " {0} exceeds total initial population for that class\n".format(i) + \
+                    " {0} > {1}".format(xt[i+8*M],self.Ni[i]))
+
+        if method.lower() == 'gillespie':
+            t_arr, out_arr, events_out =  self.simulate_gillespie_events(events=events,
+                                  contactMatrices=contactMatrices,
+                                  Tf=Tf, Nf=Nf,
+                                  events_repeat=events_repeat,
+                                  events_subsequent=events_subsequent,
+                                  stop_at_event=stop_at_event)
+        else:
+            t_arr, out_arr, events_out =  self.simulate_tau_leaping_events(events=events,
+                                  contactMatrices=contactMatrices,
+                                  Tf=Tf, Nf=Nf,
+                                  nc=nc,
+                                  epsilon= epsilon,
+                                  tau_update_frequency=tau_update_frequency,
+                                  events_repeat=events_repeat,
+                                  events_subsequent=events_subsequent,
+                                  stop_at_event=stop_at_event)
+        # Instead of the removed population, which is stored in the last compartment,
+        # we want to output the total alive population (whose knowledge is mathematically
+        # equivalent to knowing the removed population).
+        for i in range(M):
+            out_arr[:,i+8*M] += out_arr[:,i+6*M]
+            out_arr[:,i+8*M] += out_arr[:,i+5*M] + out_arr[:,i+4*M] + out_arr[:,i+3*M]
+            out_arr[:,i+8*M] += out_arr[:,i+2*M] + out_arr[:,i+1*M] + out_arr[:,i+0*M]
+
+        out_dict = {'X':out_arr, 't':t_arr,  'events_occured':events_out,
+                    'Ni':self.Ni, 'M':self.M,
+                    'alpha':self.alpha, 'beta':self.beta,
+                    'gIa':self.gIa,'gIs':self.gIs,
+                    'gIh':self.gIh,'gIc':self.gIc,
+                    'fsa':self.fsa,'fh':self.fh,
+                    'gE':self.gE,'gA':self.gA,
+                    'sa':self.sa,'hh':self.hh,
+                    'mm':self.mm,'cc':self.cc,
+                    #'iaa':self.iaa,
+                    }
+        self.population = (out_dict['X'])[:,8*self.M:9*self.M]
+        return out_dict
+
