@@ -3314,9 +3314,6 @@ cdef class SEAIRQ_testing(SIR_type):
             B[5, m, 5, m] = tE*e[m]+tA*a[m]+tIa*Ia[m]+tIs*Is[m]
         self.B_vec = self.B.reshape((self.dim, self.dim))[(self.rows, self.cols)]
 
-
-
-
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
@@ -3568,6 +3565,35 @@ cdef class Spp(SIR_type):
                     B[product_index, m, reagent_index, m] += -rate[m]*reagent[m]
         self.B_vec = self.B.reshape((self.dim, self.dim))[(self.rows, self.cols)]
 
+    def d_minuslogp_tangent(self, param_list, init_fltr, x0, obs_flattened, fltr, Tf):
+        cdef:
+            Py_ssize_t Nf=fltr.shape[0]+1, reduced_dim=obs_flattened.shape[0]
+            Py_ssize_t dim=self.dim, full_dim=(Nf-1)*dim
+        self.lambdify_derivative_functions(param_list)
+        xm, sol = self.integrate(x0, 0, Tf, Nf, dense_output=True)
+        xm = xm[1:]
+        dx, dfullcov, fullcov = self.obtain_full_mean_cov_derivatives(param_list, init_fltr, sol, Tf, Nf)
+
+        full_fltr = sparse.block_diag(fltr)
+        cov_red = full_fltr@fullcov@np.transpose(full_fltr)
+        xm_red = full_fltr@(np.ravel(xm))
+        dev=np.subtract(obs_flattened, xm_red)
+
+        full_fltr_dense = full_fltr.todense()
+        dcov_red = np.einsum('ij,jkl,mk->iml', full_fltr_dense, dfullcov, full_fltr_dense)
+        dx_red = full_fltr@dx
+
+        cov_red_inv_dev, ldet = pyross.utils.solve_symmetric_close_to_singular(cov_red, dev)
+
+        term1 = np.einsum('il,i->l', dx_red, cov_red_inv_dev)*2
+        term1 += -np.einsum('i,ijl,j->l', cov_red_inv_dev, dcov_red, cov_red_inv_dev)
+        term1 *= self.Omega/2
+
+        term2 = - np.einsum('ij,jil->l', np.linalg.inv(cov_red), dcov_red)/2
+        dminuslogp = -term1 -term2
+        return dminuslogp
+
+
 
     def lambdify_derivative_functions(self, param_list):
         """Create python functions from sympy expressions. Hashes the (in general quite long) model spec for a unique ID"""
@@ -3693,15 +3719,17 @@ cdef class Spp(SIR_type):
         dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, t_eval=time_points).y.T.reshape((Nf, dim, xdim))
         return dmudx0
 
-    def dfullcovdp(self, param_list, init_fltr, x_sol, Tf, Nf):
+    def obtain_full_mean_cov_derivatives(self, param_list, init_fltr, x_sol, Tf, Nf):
         '''
         Calculates the derivative of the full_cov, only works for tangent space for now
         '''
+        cdef:
+            Py_ssize_t dim=self.dim, full_dim = (Nf-1)*dim
+            Py_ssize_t nparams, nx0, ntotal
         nparams = len(param_list)*self.M
-        flat_params = np.ravel(self.parameters)
-        dim = self.dim
         nx0 = np.sum(init_fltr)
         ntotal = nparams + nx0
+        flat_params = np.ravel(self.parameters)
 
         dfullcovdp = np.zeros((Nf-1, dim, Nf-1, dim, ntotal), dtype=DTYPE)
         fullcov = np.zeros((Nf-1, dim, Nf-1, dim), dtype=DTYPE)
@@ -3758,7 +3786,14 @@ cdef class Spp(SIR_type):
                    element = element@U.T
                    fullcov[j, :, i, :] = element
                    fullcov[i, :, j, :] = element.T
-        return dfullcovdp
+        fullcov_mat = np.reshape(fullcov, (full_dim, full_dim))
+        dfullcov_mat = np.reshape(dfullcovdp, (full_dim, full_dim, ntotal))
+
+        dxdp = dxdp[1:].reshape((full_dim, dxdp.shape[2]))
+        dxdx0 = dxdx0[1:].reshape((full_dim, dxdx0.shape[2]))
+        dx = np.concatenate([dxdp, dxdx0], axis=1)
+
+        return dx, dfullcov_mat, fullcov_mat
 
     def dfullinvcovdp(self, param_list, x_sol, Tf, Nf):
         """ calculates the derivatives of full inv_cov. Relies on derivatives of the elements created by dinvcovelemd() """
