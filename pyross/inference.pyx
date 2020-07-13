@@ -1659,6 +1659,7 @@ cdef class SIR_type:
         if nprocesses > 1 and pathos_mp is None:
             raise Exception("The Python package `pathos` is needed for multiprocessing.")
 
+        self.contactMatrix = contactMatrix
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
 
         # Read in parameter priors
@@ -1971,6 +1972,11 @@ cdef class SIR_type:
                                                       scaled_param_guesses)
         init_estimates = estimates[param_length:]
         map_params_dict = {k:orig_params[i] for (i, k) in enumerate(keys)}
+
+        if intervention_fun is None:
+            self.contactMatrix = generator.constant_contactMatrix(**map_params_dict)
+        else:
+            self.contactMatrix = generator.intervention_custom_temporal(intervention_fun, **map_params_dict)
         map_x0 = self._construct_inits(init_estimates, init_flags, init_fltrs,
                                     obs0, fltr[0])
         l_post = -res[1]
@@ -2458,7 +2464,7 @@ cdef class SIR_type:
         log_cond_p -= self.dim*np.log(self.Omega)
         return log_cond_p
 
-    def _estimate_cond_cov(self, object sol, double t1, double t2):
+    cdef _estimate_cond_cov(self, object sol, double t1, double t2):
         cdef:
             double [:] cov_vec, sigma0=np.zeros((self.vec_size), dtype=DTYPE)
             double [:, :] cov
@@ -2569,10 +2575,10 @@ cdef class SIR_type:
         if self.lyapunov_method=='euler':
             sol_vec = pyross.utils.forward_euler_integration(rhs, M0, t1, t2, steps)[steps-1]
         elif self.lyapunov_method=='RK45':
-            res = solve_ivp(rhs, (t1, t2), M0, method='RK45', t_eval=np.array([t2]), first_step=(t2-t1)/steps, max_step=steps)
+            res = solve_ivp(rhs, (t1, t2), M0, method='RK45', t_eval=np.array([t2]), first_step=(t2-t1)/steps, max_step=(t2-t1)/steps)
             sol_vec = res.y[:, 0]
         elif self.lyapunov_method=='LSODA':
-            res = solve_ivp(rhs, (t1, t2), M0, method='LSODA', t_eval=np.array([t2]), first_step=(t2-t1)/steps, max_step=steps)
+            res = solve_ivp(rhs, (t1, t2), M0, method='LSODA', t_eval=np.array([t2]), first_step=(t2-t1)/steps, max_step=(t2-t1)/steps)
             sol_vec = res.y[:, 0]
         elif self.lyapunov_method=='RK2':
             sol_vec = pyross.utils.RK2_integration(rhs, M0, t1, t2, steps)[steps-1]
