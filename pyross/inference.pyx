@@ -2115,7 +2115,7 @@ cdef class SIR_type:
     def FIM(self, obs, fltr, Tf, contactMatrix, map_dict, tangent=False,
             eps=None):
         '''
-        Computes the Fisher Information Matrix (FIM) of the stochastic model.
+        Computes the Fisher Information Matrix (FIM) of the stochastic model for epidemiological parameters and initial conditions.
 
         Parameters
         ----------
@@ -2190,7 +2190,7 @@ cdef class SIR_type:
     def FIM_det(self, obs, fltr, Tf, contactMatrix, map_dict,
                 eps=None, measurement_error=1e-2):
         '''
-        Computes the Fisher Information Matrix (FIM) of the deterministic model.
+        Computes the Fisher Information Matrix (FIM) of the deterministic model for epidemiological parameters and initial conditions.
 
         Parameters
         ----------
@@ -2315,13 +2315,44 @@ cdef class SIR_type:
     #                                           contactMatrix, tangent, infer_scale_parameter, eps, obs0, fltr0, fd_method=fd_method)
     #     return np.sqrt(np.diagonal(np.linalg.inv(hessian)))
     
-    
-    
-    
-    
-    
     def FIM_control(self, obs, fltr, Tf, generator, map_dict, intervention_fun=None, tangent=False, eps=None):
-        
+        '''
+        Computes the Fisher Information Matrix (FIM) of the stochastic model for control parameters and initial conditions.
+
+        Parameters
+        ----------
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        Tf: float
+           Total time of the trajectory
+        generator: pyross.contactMatrix
+            A pyross.contactMatrix object that generates a contact matrix function with specified lockdown
+            parameters.
+        map_dict: dict
+           Dictionary returned by infer_parameters
+        intervention_fun: callable, optional
+            The calling signature is `intervention_func(t, **kwargs)`,
+            where t is time and kwargs are other keyword arguments for the function.
+            The function must return (aW, aS, aO), where aW, aS and aO are (2, M) arrays.
+            The contact matrices are then rescaled as :math:`aW[0]_i CW_{ij} aW[1]_j` etc.
+            If not set, assume intervention that's constant in time.
+            See `contactMatrix.constant_contactMatrix` for details on the keyword parameters.
+        tangent: bool, optional
+            Set to True to use tangent space inference. Default is False.
+        eps: float or numpy.array, optional
+            Step size for numerical differentiation of the process mean and its
+            full covariance matrix with respect to the parameters.
+            If not specified, the array of square roots of the machine epsilon of the MAP estimates is used.
+            Decreasing the step size too small can result in round-off error.
+        Returns
+        -------
+        FIM: 2d numpy.array
+            The Fisher Information Matrix
+        '''
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
         flat_maps = map_dict['flat_map']
         kwargs = {}
@@ -2369,12 +2400,44 @@ cdef class SIR_type:
         FIM[i_lower] = FIM.T[i_lower]
         return FIM
     
-    
-
     def FIM_det_control(self, obs, fltr, Tf, generator, map_dict,
                         intervention_fun=None,
                 eps=None, measurement_error=1e-2):
+        '''
+        Computes the Fisher Information Matrix (FIM) of the deterministic model for control parameters and initial conditions.
 
+        Parameters
+        ----------
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        Tf: float
+           Total time of the trajectory
+        generator: pyross.contactMatrix
+            A pyross.contactMatrix object that generates a contact matrix function with specified lockdown
+            parameters.
+        map_dict: dict
+           Dictionary returned by infer_parameters
+        intervention_fun: callable, optional
+            The calling signature is `intervention_func(t, **kwargs)`,
+            where t is time and kwargs are other keyword arguments for the function.
+            The function must return (aW, aS, aO), where aW, aS and aO are (2, M) arrays.
+            The contact matrices are then rescaled as :math:`aW[0]_i CW_{ij} aW[1]_j` etc.
+            If not set, assume intervention that's constant in time.
+            See `contactMatrix.constant_contactMatrix` for details on the keyword parameters.
+        eps: float or numpy.array, optional
+           Step size for numerical differentiation of the process mean and its full covariance matrix with respect
+            to the parameters. If not specified, the array of square roots of the machine epsilon of the MAP estimates is used. Decreasing the step size too small can result in round-off error.
+        measurement_error: float, optional
+            Standard deviation of measurements (uniform and independent Gaussian measurement error assumed). Default is 1e-2.
+        Returns
+        -------
+        FIM_det: 2d numpy.array
+            The Fisher Information Matrix
+        '''
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
         flat_maps = map_dict['flat_map']
         kwargs = {}
@@ -2422,7 +2485,7 @@ cdef class SIR_type:
                             scaled_param_guesses=None, param_length=None,
                             obs=None, fltr=None, Tf=None, obs0=None,
                             init_flags=None, init_fltrs=None):
-        """Objective function for differentiation call in FIM and FIM_det."""
+        """Objective function for differentiation call in FIM_control and FIM_det_control."""
         inits =  np.copy(params[param_length:])
 
         # Restore parameters from flattened parameters
@@ -2450,7 +2513,7 @@ cdef class SIR_type:
                             scaled_param_guesses=None, param_length=None,
                             obs=None, fltr=None, Tf=None, obs0=None,
                             init_flags=None, init_fltrs=None, tangent=None):
-        """Objective function for differentiation call in FIM."""
+        """Objective function for differentiation call in FIM_control."""
         inits =  np.copy(params[param_length:])
 
         # Restore parameters from flattened parameters
@@ -2476,7 +2539,7 @@ cdef class SIR_type:
         cov_red = full_fltr@full_cov@np.transpose(full_fltr)
         return cov_red
 
-
+    
     def sample_gaussian_latent(self, N, map_estimate, cov, obs, fltr, Tf, contactMatrix, param_priors, init_priors,
                                tangent=False):
         """
