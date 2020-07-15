@@ -3571,14 +3571,14 @@ cdef class Spp(SIR_type):
                     B[product_index, m, reagent_index, m] += -rate[m]*reagent[m]
         self.B_vec = self.B.reshape((self.dim, self.dim))[(self.rows, self.cols)]
 
-    def d_minuslogp_tangent(self, param_list, init_fltr, x0, obs_flattened, fltr, Tf):
+    def d_minuslogp_tangent(self, x0, obs_flattened, fltr, Tf, dx0, param_list, CM, dp):
         cdef:
             Py_ssize_t Nf=fltr.shape[0]+1, reduced_dim=obs_flattened.shape[0]
             Py_ssize_t dim=self.dim, full_dim=(Nf-1)*dim
-        self.lambdify_derivative_functions(param_list)
+        self.lambdify_derivative_functions(param_list, CM)
         xm, sol = self.integrate(x0, 0, Tf, Nf, dense_output=True)
         xm = xm[1:]
-        dx, dfullcov, fullcov = self.obtain_full_mean_cov_derivatives(param_list, init_fltr, sol, Tf, Nf)
+        dx, dfullcov, fullcov = self.obtain_full_mean_cov_derivatives(sol, Tf, Nf, dx0, dp)
 
         full_fltr = sparse.block_diag(fltr)
         cov_red = full_fltr@fullcov@np.transpose(full_fltr)
