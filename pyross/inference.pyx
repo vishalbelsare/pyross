@@ -3384,6 +3384,7 @@ cdef class Spp(SIR_type):
         readonly np.ndarray parameters
         readonly pyross.deterministic.Spp det_model
         readonly dict model_spec
+        readonly Py_ssize_t no_inferred_params
         readonly object dA, dB, dJ, dinvcov_e
 
 
@@ -3440,7 +3441,6 @@ cdef class Spp(SIR_type):
 
     def set_det_model(self, parameters):
         self.det_model.update_model_parameters(parameters)
-
 
     def make_params_dict(self):
         param_dict = {k:self.parameters[i] for (i, k) in enumerate(self.param_keys)}
@@ -3601,7 +3601,7 @@ cdef class Spp(SIR_type):
 
 
 
-    def lambdify_derivative_functions(self, param_list):
+    def lambdify_derivative_functions(self, param_list, CM=False):
         """Create python functions from sympy expressions. Hashes the (in general quite long) model spec for a unique ID"""
         def dict_id(spec, keys):
             """Returns a string ID corresponding to the content of the model spec. Appending the model spec itsle fwould lead to veyr long string names in general"""
@@ -3611,10 +3611,14 @@ cdef class Spp(SIR_type):
             return hashlib.sha1(unique_str.encode()).hexdigest()
 
         print("Looking for saved derivative functions...")
-        keys = np.zeros_like(self.parameters, dtype=bool)
+        cdef Py_ssize_t total_nparams=self.parameters.shape[0], M=self.M
+        keys = np.zeros((total_nparams+M, M), dtype=bool)
         for (i, k) in enumerate(self.param_keys):
             if k in param_list:
                 keys[i] = True
+        if CM:
+            keys[total_nparams:] = True
+        self.no_inferred_params = (len(param_list)+CM*self.M)*self.M
 
         try:
             spec_ID=dict_id(self.model_spec, keys)
@@ -3625,8 +3629,8 @@ cdef class Spp(SIR_type):
                 self.dB = dill.load(file_dB)
             with open(f"dJ_{spec_ID}.bin", "rb") as file_dJ:
                 self.dJ = dill.load(file_dJ)
-            with open(f"dinvcov_{spec_ID}.bin", "rb") as file_dc:
-                self.dinvcov_e = dill.load(file_dc)
+            # with open(f"dinvcov_{spec_ID}.bin", "rb") as file_dc:
+            #     self.dinvcov_e = dill.load(file_dc)
             print("Loaded.")
         except FileNotFoundError:
             print("None found. Creating python functions from sympy expressions (this might take a while)...")
@@ -3634,8 +3638,9 @@ cdef class Spp(SIR_type):
             M=self.M
             nClass=self.nClass
             parameters=self.parameters
-            p = sympy.Matrix( sympy.symarray('p', (parameters.shape[0], parameters.shape[1]) )) ## epi-p only
+            p = sympy.Matrix( sympy.symarray('p', (parameters.shape[0], M))) ## epi-p only
             CM = sympy.Matrix( sympy.symarray('CM', (M, M)))
+            p_and_CM = sympy.Matrix.vstack(p, CM)
             Binv_i = sympy.Matrix( sympy.symarray('Binv_i', (self.dim, self.dim)))
             Binv_f = sympy.Matrix( sympy.symarray('Binv_f', (self.dim, self.dim)))
             fi = sympy.Matrix( sympy.symarray('fi', (1, M)))
@@ -3647,19 +3652,19 @@ cdef class Spp(SIR_type):
 
 
             print('creating dA')
-            self.dA = sympy.lambdify(expr_var_list, self.dAd(p, keys=keys))
+            self.dA = sympy.lambdify(expr_var_list, self.dAd(p_and_CM, keys=keys))
             print('creating dB')
-            self.dB = sympy.lambdify(expr_var_list, self.dBd(p, keys=keys))
+            self.dB = sympy.lambdify(expr_var_list, self.dBd(p_and_CM, keys=keys))
             print('creating dJ')
-            self.dJ = sympy.lambdify(expr_var_list, self.dJd(p, keys=keys))
-            print('creating dinvcov_e')
-            self.dinvcov_e = sympy.lambdify(expr_var_list_ext, self.dinvcovelemd(p, keys=keys) )
+            self.dJ = sympy.lambdify(expr_var_list, self.dJd(p_and_CM, keys=keys))
+            # print('creating dinvcov_e')
+            # self.dinvcov_e = sympy.lambdify(expr_var_list_ext, self.dinvcovelemd(p, keys=keys) )
             print("Functions created. They will be saved for future function calls")
             dill.settings['recurse']=True
             dill.dump(self.dA, open(f"dA_{spec_ID}.bin", "wb"))
             dill.dump(self.dB, open(f"dB_{spec_ID}.bin", "wb"))
             dill.dump(self.dJ, open(f"dJ_{spec_ID}.bin", "wb"))
-            dill.dump(self.dinvcov_e, open(f"dinvcov_{spec_ID}.bin", "wb"))
+            # dill.dump(self.dinvcov_e, open(f"dinvcov_{spec_ID}.bin", "wb"))
 
     def _obtain_full_backward_time_evol_op(self, sol, t1, t2):
         '''
@@ -3676,28 +3681,29 @@ cdef class Spp(SIR_type):
         res = solve_ivp(rhs, (t2, t1), U0, method=self.det_method, dense_output=True)
         return res.sol
 
-    def dmudp(self, param_list, x_sol, Tf, Nf, rtol=1e-4):
+    def dmudp(self, x_sol, Tf, Nf, dp, rtol=1e-4):
         """
         calculates the derivatives of the mean traj x with respect to epi params and inits
         """
 
         fi=self.fi
-        no_inferred_params = len(param_list)*self.M
+        no_reduced_params = dp.shape[1]
+        assert self.no_inferred_params == dp.shape[0]
         param_values = np.ravel(self.parameters)
 
         def integrand(t):
             n = np.size(t)
-            f = np.empty((self.dim, no_inferred_params, n), dtype=DTYPE)
+            f = np.empty((self.dim, no_reduced_params, n), dtype=DTYPE)
             for i in range(n):
                 x = x_sol(t[i])/self.Omega
                 U =  U_sol(t[i]).reshape((self.dim, self.dim)) # transpose of U(t, Tf)
                 CM_f = np.ravel(self.contactMatrix(t[i]))
                 dAdp, _ = self.dA(param_values, CM_f, fi, x)
                 # dAdp of shape (no_inferred_params, self.dim)
-                f[:, :, i] = np.einsum('ji,kj->ik', U, dAdp) # U.T * dAdp.T
+                f[:, :, i] = np.einsum('ji,kj,kl->il', U, dAdp, dp) # U.T * dAdp.T
             return f
 
-        fshape = (self.dim, no_inferred_params)
+        fshape = (self.dim, no_reduced_params)
         time_series = np.zeros((Nf, *fshape), dtype=DTYPE)
         time_points = np.linspace(0, Tf, Nf)
         val = np.zeros(fshape, dtype=DTYPE)
@@ -3711,8 +3717,9 @@ cdef class Spp(SIR_type):
             val = time_series[i]
         return time_series
 
-    def dmudx0(self, init_fltr, x_sol, Tf, Nf):
-        cdef Py_ssize_t xdim = np.sum(init_fltr), dim=self.dim
+    def dmudx0(self, x_sol, Tf, Nf, dx0):
+        cdef Py_ssize_t xdim = dx0.shape[1], dim=self.dim
+        assert dx0.shape[0]==dim
         def rhs(t, U_vec):
             xt = x_sol(t)/self.Omega
             self.compute_jacobian_and_b_matrix(xt, t, b_matrix=False, jacobian=True)
@@ -3720,20 +3727,20 @@ cdef class Spp(SIR_type):
             dUdt = np.dot(self.J_mat, U_mat) #
             return np.ravel(dUdt)
 
-        U0 = np.identity((self.dim))[:, init_fltr].flatten()
+        U0 = (np.identity((self.dim))@dx0).flatten()
         time_points = np.linspace(0, Tf, Nf)
         dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, t_eval=time_points).y.T.reshape((Nf, dim, xdim))
         return dmudx0
 
-    def obtain_full_mean_cov_derivatives(self, param_list, init_fltr, x_sol, Tf, Nf):
+    def obtain_full_mean_cov_derivatives(self, x_sol, Tf, Nf, dx0, dp, rtol=1e-4):
         '''
         Calculates the derivative of the full_cov, only works for tangent space for now
         '''
         cdef:
             Py_ssize_t dim=self.dim, full_dim = (Nf-1)*dim
             Py_ssize_t nparams, nx0, ntotal
-        nparams = len(param_list)*self.M
-        nx0 = np.sum(init_fltr)
+        nparams = dp.shape[1]
+        nx0 = dx0.shape[1]
         ntotal = nparams + nx0
         flat_params = np.ravel(self.parameters)
 
@@ -3742,8 +3749,8 @@ cdef class Spp(SIR_type):
         cov = np.zeros((dim, dim), dtype=DTYPE)
         dcov = np.zeros((dim, dim, ntotal), dtype=DTYPE)
 
-        dxdp = self.dmudp(param_list, x_sol, Tf, Nf)
-        dxdx0 = self.dmudx0(init_fltr, x_sol, Tf, Nf)
+        dxdp = self.dmudp(x_sol, Tf, Nf, dp, rtol=rtol)
+        dxdx0 = self.dmudx0(x_sol, Tf, Nf, dx0)
         time_points = np.linspace(0, Tf, Nf)
         dt = time_points[1]
 
@@ -3757,10 +3764,11 @@ cdef class Spp(SIR_type):
            dxtdx0 = dxdx0[i]
            dBdp, dBdx = self.dB(flat_params, CM_f, self.fi, xt)
            dJdp, dJdx = self.dJ(flat_params, CM_f, self.fi, xt)
-           dcond_covdp = dt*np.add(dBdp, np.einsum('kij,kl->lij', dBdx, dxtdp))
+
+           dcond_covdp = dt*np.add(np.einsum('lij,lm->mij', dBdp, dp), np.einsum('kij,kl->lij', dBdx, dxtdp))
            dcond_covdx0 = dt*np.einsum('kij,kl->lij', dBdx, dxtdx0)
            dcond_cov = np.concatenate([dcond_covdp, dcond_covdx0], axis=0)
-           dUdp =dt*np.add(dJdp, np.einsum('kij,kl->lij', dJdx, dxtdp))
+           dUdp =dt*np.add(np.einsum('lij,lm->mij', dJdp, dp), np.einsum('kij,kl->lij', dJdx, dxtdp))
            dUdx0 = dt*np.einsum('kij,kl->lij', dJdx, dxtdx0)
            dU = np.concatenate([dUdp, dUdx0], axis=0)
 
