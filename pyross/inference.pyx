@@ -3626,11 +3626,136 @@ cdef class Spp(SIR_type):
                     B[product_index, m, reagent_index, m] += -rate[m]*reagent[m]
         self.B_vec = self.B.reshape((self.dim, self.dim))[(self.rows, self.cols)]
 
-    def d_minuslogp_tangent(self, x0, obs_flattened, fltr, Tf, dx0, param_list, CM, dp):
+    def _latent_minus_logp_with_grad(self, params, grad=None, compute_grad=False,
+                            param_keys=None,
+                            param_guess_range=None, is_scale_parameter=None,
+                            scaled_param_guesses=None, param_length=None,
+                            obs=None, fltr=None, Tf=None, obs0=None,
+                            init_flags=None, init_fltrs=None,
+                            s=None, scale=None, tangent=None, dp=None, dx0=None):
+        """Objective function for minimization call in laten_inference."""
+        inits =  np.copy(params[param_length:])
+
+        # Restore parameters from flattened parameters
+        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
+                          param_guess_range, is_scale_parameter, scaled_param_guesses)
+
+        parameters = self.fill_params_dict(param_keys, orig_params)
+        self.set_params(parameters)
+        self.set_det_model(parameters)
+        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
+        # penalty = self._penalty_from_negative_values(x0)
+        # x0[x0<0] = 0.1/self.Omega # set to be small and positive
+
+        if compute_grad:
+            minus_logp, dminus_logp = self._minuslogp_and_grad(x0, obs, fltr[1:], Tf, dx0, dp)
+            dminus_logp -= pyross.utils.lognorm_dpdf(params, s, scale)
+        else:
+            minus_logp = self._obtain_logp_for_lat_traj(x0, obs, fltr[1:], Tf, tangent)
+        minus_logp -= np.sum(lognorm.logpdf(params, s, scale=scale))
+
+        # add penalty for being negative
+        # minus_logp += penalty*fltr.shape[0]
+
+        if compute_grad and np.size(grad) > 0:
+            grad[:] = dminus_logp
+        return minus_logp
+
+    def latent_infer_parameters(self, np.ndarray obs, np.ndarray fltr, double Tf,
+                                contactMatrix, param_priors, init_priors,
+                                tangent=False, verbose=False, use_gradient=False,
+                                double ftol=1e-5,
+                                global_max_iter=100, local_max_iter=100, global_atol=1,
+                                enable_global=True, enable_local=True, cma_processes=0,
+                                cma_population=16):
+        self.contactMatrix = contactMatrix
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+
+        # Read in parameter priors
+        keys, param_guess, param_stds, param_bounds, param_guess_range, \
+        is_scale_parameter, scaled_param_guesses \
+            = pyross.utils.parse_param_prior_dict(param_priors, self.M)
+
+        # Read in initial conditions priors
+        init_guess, init_stds, init_bounds, init_flags, init_fltrs \
+            = pyross.utils.parse_init_prior_dict(init_priors, self.dim, len(obs0))
+
+        # Concatenate the flattend parameter guess with init guess
+        param_length = param_guess.shape[0]
+        guess = np.concatenate([param_guess, init_guess]).astype(DTYPE)
+        stds = np.concatenate([param_stds,init_stds]).astype(DTYPE)
+        bounds = np.concatenate([param_bounds, init_bounds], axis=0).astype(DTYPE)
+
+        s, scale = pyross.utils.make_log_norm_dist(guess, stds)
+        cma_stds = np.minimum(stds, (bounds[:, 1]-bounds[:, 0])/3)
+
+        minimize_args = {'param_keys':keys, 'param_guess_range':param_guess_range,
+                        'is_scale_parameter':is_scale_parameter,
+                        'scaled_param_guesses':scaled_param_guesses,
+                        'param_length':param_length,
+                        'obs':obs, 'fltr':fltr, 'Tf':Tf, 'obs0':obs0,
+                        'init_flags':init_flags, 'init_fltrs': init_fltrs,
+                        's':s, 'scale':scale, 'tangent':tangent}
+
+        if use_gradient:
+            f = self._latent_minus_logp_with_grad
+            self.lambdify_derivative_functions(keys, CM=False)
+            dp_diag = []
+            for r in param_guess_range:
+                if np.size(r) == 1:
+                    dp_diag.append(np.ones((self.M, 1)))
+                else:
+                    dp_diag.append(np.identity(self.M))
+            dp = sparse.block_diag(dp_diag).todense()
+            assert not init_flags[0] and init_flags[1], 'no gradient algorithm available'
+            dx0 = np.identity(self.dim)[:, init_fltrs[1]]
+            minimize_args['dp'] = dp
+            minimize_args['dx0'] = dx0
+        else:
+            f = self._latent_minus_logp
+
+        res = minimization(f,
+                           guess, bounds, ftol=ftol, global_max_iter=global_max_iter,
+                           local_max_iter=local_max_iter, global_atol=global_atol,
+                           enable_global=enable_global, enable_local=enable_local,
+                           cma_processes=cma_processes, use_gradient=use_gradient,
+                           cma_population=cma_population, cma_stds=cma_stds,
+                           verbose=verbose, args_dict=minimize_args)
+
+        estimates = res[0]
+
+        # Get the parameters (in their original structure) from the flattened parameter vector.
+        param_estimates = estimates[:param_length]
+        orig_params = pyross.utils.unflatten_parameters(param_estimates,
+                                                        param_guess_range,
+                                                        is_scale_parameter,
+                                                        scaled_param_guesses)
+        init_estimates = estimates[param_length:]
+        map_params_dict = self.fill_params_dict(keys, orig_params)
+        self.set_params(map_params_dict)
+        self.set_det_model(map_params_dict)
+        map_x0 = self._construct_inits(init_estimates, init_flags, init_fltrs,
+                                      obs0, fltr[0])
+        l_post = -res[1]
+        l_prior = np.sum(lognorm.logpdf(estimates, s, scale=scale))
+        l_like = l_post - l_prior
+        output_dict = {
+            'map_params_dict':map_params_dict, 'map_x0':map_x0, 'flat_map':estimates,
+            'param_keys': keys, 'param_guess_range': param_guess_range,
+            'log_posterior':l_post, 'log_prior':l_prior, 'log_likelihood':l_like,
+            'is_scale_parameter':is_scale_parameter, 'param_length':param_length,
+            'scaled_param_guesses':scaled_param_guesses,
+            'init_flags': init_flags, 'init_fltrs': init_fltrs,
+            's':s, 'scale': scale
+        }
+        return output_dict
+
+
+
+    def _minuslogp_and_grad(self, x0, obs_flattened, fltr, Tf, dx0, dp):
         cdef:
             Py_ssize_t Nf=fltr.shape[0]+1, reduced_dim=obs_flattened.shape[0]
             Py_ssize_t dim=self.dim, full_dim=(Nf-1)*dim
-        self.lambdify_derivative_functions(param_list, CM)
         xm, sol = self.integrate(x0, 0, Tf, Nf, dense_output=True)
         xm = xm[1:]
         dx, dfullcov, fullcov = self.obtain_full_mean_cov_derivatives(sol, Tf, Nf, dx0, dp)
@@ -3646,15 +3771,17 @@ cdef class Spp(SIR_type):
 
         cov_red_inv_dev, ldet = pyross.utils.solve_symmetric_close_to_singular(cov_red, dev)
 
-        term1 = np.einsum('il,i->l', dx_red, cov_red_inv_dev)*2
+        term1 = -np.einsum('il,i->l', dx_red, cov_red_inv_dev)*2
         term1 += -np.einsum('i,ijl,j->l', cov_red_inv_dev, dcov_red, cov_red_inv_dev)
         term1 *= self.Omega/2
 
-        term2 = - np.einsum('ij,jil->l', np.linalg.inv(cov_red), dcov_red)/2
-        dminuslogp = -term1 -term2
-        return dminuslogp
+        term2 = np.einsum('ij,jil->l', np.linalg.inv(cov_red), dcov_red)/2
+        dminuslogp = term1 +term2
 
+        minuslogp = np.dot(dev, cov_red_inv_dev)*(self.Omega/2)
+        minuslogp += (ldet-reduced_dim*log(self.Omega))/2 + (reduced_dim/2)*log(2*PI)
 
+        return minuslogp, dminuslogp
 
     def lambdify_derivative_functions(self, param_list, CM=False):
         """Create python functions from sympy expressions. Hashes the (in general quite long) model spec for a unique ID"""
@@ -3754,8 +3881,8 @@ cdef class Spp(SIR_type):
                 U =  U_sol(t[i]).reshape((self.dim, self.dim)) # transpose of U(t, Tf)
                 CM_f = np.ravel(self.contactMatrix(t[i]))
                 dAdp, _ = self.dA(param_values, CM_f, fi, x)
-                # dAdp of shape (no_inferred_params, self.dim)
-                f[:, :, i] = np.einsum('ji,kj,kl->il', U, dAdp, dp) # U.T * dAdp.T
+                # dAdp of shape (no_reduced_params, self.dim)
+                f[:, :, i] = U.T@np.array(dAdp).T@dp 
             return f
 
         fshape = (self.dim, no_reduced_params)
@@ -3787,7 +3914,7 @@ cdef class Spp(SIR_type):
         dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, t_eval=time_points).y.T.reshape((Nf, dim, xdim))
         return dmudx0
 
-    def obtain_full_mean_cov_derivatives(self, x_sol, Tf, Nf, dx0, dp, rtol=1e-4):
+    cpdef obtain_full_mean_cov_derivatives(self, x_sol, Tf, Nf, dx0, dp, rtol=1e-4):
         '''
         Calculates the derivative of the full_cov, only works for tangent space for now
         '''

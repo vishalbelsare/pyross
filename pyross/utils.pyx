@@ -174,6 +174,9 @@ def make_log_norm_dist(means, stds):
     s = np.sqrt(np.log(1+var/means_sq))
     return s, scale
 
+def lognorm_dpdf(x, s, scale):
+    return -(np.log(x/scale)/s**2 + 1)/x
+
 DTYPE = np.float
 ctypedef np.float_t DTYPE_t
 

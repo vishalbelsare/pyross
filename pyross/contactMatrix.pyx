@@ -62,7 +62,7 @@ cdef class ContactMatrixFunction:
 
     cpdef get_individual_contactMatrices(self):
         '''
-        Returns the internal CH, CW, CS and CO 
+        Returns the internal CH, CW, CS and CO
         '''
         return self.CH, self.CW, self.CS, self.CO
 
@@ -893,7 +893,7 @@ def Denmark():
     uH = u1 + u2 + 'home_1.xlsx'
     uW = u1 + u2 + 'work_1.xlsx'
     uS = u1 + u2 + 'school_1.xlsx'
-    uO = u1 + u2 + 'other_locations_1.xlsx' 
+    uO = u1 + u2 + 'other_locations_1.xlsx'
 
     import pandas as pd
     CH = np.array(pd.read_excel(uH,  sheet_name='Denmark'))
@@ -911,25 +911,25 @@ def France(source='fumanelliEtAl'):
         uH = u1 + u2 + 'home_1.xlsx'
         uW = u1 + u2 + 'work_1.xlsx'
         uS = u1 + u2 + 'school_1.xlsx'
-        uO = u1 + u2 + 'other_locations_1.xlsx' 
+        uO = u1 + u2 + 'other_locations_1.xlsx'
 
         import pandas as pd
         CH = np.array(pd.read_excel(uH,  sheet_name='France'))
         CW = np.array(pd.read_excel(uW,  sheet_name='France'))
         CS = np.array(pd.read_excel(uS,  sheet_name='France'))
         CO = np.array(pd.read_excel(uO,  sheet_name='France'))
-    
+
     elif source=='fumanelliEtAl':
         u1 ='https://raw.githubusercontent.com/rajeshrinet/pystokes-misc/master/cm/'
         uH = u1 + 'France_H.txt'
         uW = u1 + 'France_W.txt'
         uS = u1 + 'France_S.txt'
-        uO = u1 + 'France_O.txt' 
-    
+        uO = u1 + 'France_O.txt'
+
         CH = np.genfromtxt(uH)
         CW = np.genfromtxt(uW)
         CS = np.genfromtxt(uS)
-        CO = np.genfromtxt(uO) 
+        CO = np.genfromtxt(uO)
     else:
         raise Exception("Please use 'premEtAl' or 'fumanelliEtAl'")
     return CH, CW, CS, CO
@@ -942,7 +942,7 @@ def Germany():
     uH = u1 + u2 + 'home_1.xlsx'
     uW = u1 + u2 + 'work_1.xlsx'
     uS = u1 + u2 + 'school_1.xlsx'
-    uO = u1 + u2 + 'other_locations_1.xlsx' 
+    uO = u1 + u2 + 'other_locations_1.xlsx'
 
     import pandas as pd
     CH = np.array(pd.read_excel(uH,  sheet_name='Germany'))
@@ -958,7 +958,7 @@ def India():
     uH = u1 + u2 + 'home_1.xlsx'
     uW = u1 + u2 + 'work_1.xlsx'
     uS = u1 + u2 + 'school_1.xlsx'
-    uO = u1 + u2 + 'other_locations_1.xlsx' 
+    uO = u1 + u2 + 'other_locations_1.xlsx'
 
     import pandas as pd
     CH = np.array(pd.read_excel(uH,  sheet_name='India'))
@@ -974,7 +974,7 @@ def Italy():
     uH = u1 + u2 + 'home_1.xlsx'
     uW = u1 + u2 + 'work_1.xlsx'
     uS = u1 + u2 + 'school_1.xlsx'
-    uO = u1 + u2 + 'other_locations_1.xlsx' 
+    uO = u1 + u2 + 'other_locations_1.xlsx'
 
     import pandas as pd
     CH = np.array(pd.read_excel(uH,  sheet_name='Italy'))
@@ -992,13 +992,13 @@ def UK(source='premEtAl'):
         uH = u1 + u2 + 'home_2.xlsx'
         uW = u1 + u2 + 'work_2.xlsx'
         uS = u1 + u2 + 'school_2.xlsx'
-        uO = u1 + u2 + 'other_locations_2.xlsx' 
-    
+        uO = u1 + u2 + 'other_locations_2.xlsx'
+
         import pandas as pd
         CH0 = np.array(pd.read_excel(uH,  sheet_name='United Kingdom of Great Britain'))
         CW0 = np.array(pd.read_excel(uW,  sheet_name='United Kingdom of Great Britain'))
         CS0 = np.array(pd.read_excel(uS,  sheet_name='United Kingdom of Great Britain'))
-        CO0 = np.array(pd.read_excel(uO,  sheet_name='United Kingdom of Great Britain')) 
+        CO0 = np.array(pd.read_excel(uO,  sheet_name='United Kingdom of Great Britain'))
 
         CH = np.zeros((16, 16))
         CH[0,:]= np.array((0.478812799633172, 0.55185413960287,0.334323605154544,0.132361228266194,
@@ -1007,21 +1007,21 @@ def UK(source='premEtAl'):
                            0.00553694264516568,0.00142187285266089,0,0.000505582193632659))
         for i in range(15):
             CH[i+1, :] = CH0[i, :]
-        
-            
+
+
         CW = np.zeros((16, 16))
         CW[0,:]= np.array((0,0,0,0,0,0,0,0,0,0,0,0,0,0.0,0.,0.0))
         for i in range(15):
             CW[i+1, :] = CW0[i, :]
-        
-            
+
+
         CS = np.zeros((16, 16))
         CS[0,:]= np.array((0.974577996106766,0.151369805263473,0.00874880925953218,0.0262790907947637,
                            0.0111281607429249,0.0891043051294382,0.125477587043249,0.0883182775274553,
                            0.0371824197201174,0.0294092695284747,0.,0.0,0.00758428705895781,0.00151636767747242,0,0))
         for i in range(15):
             CS[i+1, :] = CS0[i, :]
-        
+
         CO = np.zeros((16, 16))
         CO[0,:]= np.array((0.257847576361162,0.100135168376607,0.0458036773638843,0.127084549151753,0.187303683093508,
                            0.257979214509792,0.193228849121415,0.336594916946786,0.309223290169635,0.070538522966953,
@@ -1029,30 +1029,30 @@ def UK(source='premEtAl'):
                            0.00669781557624776))
         for i in range(15):
             CO[i+1, :] = CO0[i, :]
-    
+
     elif source=='fumanelliEtAl':
         u1 ='https://raw.githubusercontent.com/rajeshrinet/pystokes-misc/master/cm/'
         uH = u1 + 'UKH.txt'
         uW = u1 + 'UKW.txt'
         uS = u1 + 'UKS.txt'
-        uO = u1 + 'UKO.txt' 
-    
+        uO = u1 + 'UKO.txt'
+
         CH = np.genfromtxt(uH)
         CW = np.genfromtxt(uW)
         CS = np.genfromtxt(uS)
-        CO = np.genfromtxt(uO) 
-    
+        CO = np.genfromtxt(uO)
+
     elif source=='klepacEtAl':
         u1 ='https://raw.githubusercontent.com/rajeshrinet/pyross/master/examples/data/cm/'
         uH = u1 + 'ukh.txt'
         uW = u1 + 'ukw.txt'
         uS = u1 + 'uks.txt'
-        uO = u1 + 'uko.txt' 
-    
+        uO = u1 + 'uko.txt'
+
         CH = np.genfromtxt(uH)
         CW = np.genfromtxt(uW)
         CS = np.genfromtxt(uS)
-        CO = np.genfromtxt(uO) 
+        CO = np.genfromtxt(uO)
 
     else:
         raise Exception("Please use 'premEtAl' or 'fumanelliEtAl' or 'klepacEtAl' ")

@@ -18,7 +18,7 @@ try:
 except ImportError:
     nestle = None
 
-def minimization(objective_fct, guess, bounds, global_max_iter=100,
+def minimization(objective_fct, guess, bounds, use_gradient=False, global_max_iter=100,
                 local_max_iter=100, ftol=1e-2, global_atol=1,
                  enable_global=True, enable_local=True, cma_processes=0, cma_population=16, cma_stds=None,
                  cma_random_seed=None, verbose=True, args_dict={}):
@@ -151,7 +151,11 @@ def minimization(objective_fct, guess, bounds, global_max_iter=100,
         # Use derivative free local optimisation algorithm with support for boundary conditions
         # to converge to the next minimum (which is hopefully the global one).
         dim = len(guess)
-        local_opt = nlopt.opt(nlopt.LN_BOBYQA, guess.shape[0])
+        if use_gradient:
+            args_dict['compute_grad'] = True
+            local_opt = nlopt.opt(nlopt.LD_MMA, guess.shape[0])
+        else:
+            local_opt = nlopt.opt(nlopt.LN_BOBYQA, guess.shape[0])
         local_opt.set_min_objective(lambda x, grad: objective_fct(x, grad, **args_dict))
         local_opt.set_lower_bounds(bounds[:,0])
         local_opt.set_upper_bounds(bounds[:,1])
