@@ -126,21 +126,12 @@ def parse_model_spec(model_spec, param_keys):
             class_index_dict['NiQ'] = nClass
             nClass += 1
 
-
-
-
     except KeyError:
         raise Exception('No reactions for some classes. Please check model_spec again')
 
     # set the product index
     set_destination(linear_terms_list, linear_terms_destination_dict)
     set_destination(infection_terms_list, infection_terms_destination_dict)
-
-
-
-
-
-
     res = (nClass, class_index_dict, np.array(constant_term_list, dtype=np.intc, ndmin=2),
                                      np.array(linear_terms_list, dtype=np.intc, ndmin=2),
                                      np.array(infection_terms_list, dtype=np.intc, ndmin=2),

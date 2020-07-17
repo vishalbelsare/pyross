@@ -3703,19 +3703,18 @@ cdef class Spp(SIR_type):
             dp_diag = []
             for r in param_guess_range:
                 if np.size(r) == 1:
-                    dp_diag.append(np.ones((self.M, 1)))
+                    dp_diag.append(np.ones((1, self.M)))
                 else:
                     dp_diag.append(np.identity(self.M))
             dp = sparse.block_diag(dp_diag).todense()
             assert not init_flags[0] and init_flags[1], 'no gradient algorithm available'
-            dx0 = np.identity(self.dim)[:, init_fltrs[1]]
+            dx0 = np.identity(self.dim)[init_fltrs[1], :]
             minimize_args['dp'] = dp
             minimize_args['dx0'] = dx0
         else:
             f = self._latent_minus_logp
 
-        res = minimization(f,
-                           guess, bounds, ftol=ftol, global_max_iter=global_max_iter,
+        res = minimization(f, guess, bounds, ftol=ftol, global_max_iter=global_max_iter,
                            local_max_iter=local_max_iter, global_atol=global_atol,
                            enable_global=enable_global, enable_local=enable_local,
                            cma_processes=cma_processes, use_gradient=use_gradient,
@@ -3755,7 +3754,8 @@ cdef class Spp(SIR_type):
     def _minuslogp_and_grad(self, x0, obs_flattened, fltr, Tf, dx0, dp):
         cdef:
             Py_ssize_t Nf=fltr.shape[0]+1, reduced_dim=obs_flattened.shape[0]
-            Py_ssize_t dim=self.dim, full_dim=(Nf-1)*dim
+            Py_ssize_t dim=self.dim, full_dim=(Nf-1)*dim, i
+            Py_ssize_t ntotal=dx0.shape[0]+dp.shape[0]
         xm, sol = self.integrate(x0, 0, Tf, Nf, dense_output=True)
         xm = xm[1:]
         dx, dfullcov, fullcov = self.obtain_full_mean_cov_derivatives(sol, Tf, Nf, dx0, dp)
@@ -3765,17 +3765,18 @@ cdef class Spp(SIR_type):
         xm_red = full_fltr@(np.ravel(xm))
         dev=np.subtract(obs_flattened, xm_red)
 
-        full_fltr_dense = full_fltr.todense()
-        dcov_red = np.einsum('ij,jkl,mk->iml', full_fltr_dense, dfullcov, full_fltr_dense)
-        dx_red = full_fltr@dx
+        dcov_red = np.empty((ntotal, reduced_dim, reduced_dim), dtype=DTYPE)
+        for i in range(ntotal):
+            dcov_red[i] = full_fltr@dfullcov[i]@(full_fltr.T)
+        dx_red = (full_fltr@dx.T).T
 
         cov_red_inv_dev, ldet = pyross.utils.solve_symmetric_close_to_singular(cov_red, dev)
 
-        term1 = -np.einsum('il,i->l', dx_red, cov_red_inv_dev)*2
-        term1 += -np.einsum('i,ijl,j->l', cov_red_inv_dev, dcov_red, cov_red_inv_dev)
+        term1 = -dx_red@cov_red_inv_dev*2
+        term1 += -cov_red_inv_dev@dcov_red@cov_red_inv_dev
         term1 *= self.Omega/2
 
-        term2 = np.einsum('ij,jil->l', np.linalg.inv(cov_red), dcov_red)/2
+        term2 = np.trace(np.linalg.inv(cov_red)@dcov_red, axis1=1, axis2=2)/2
         dminuslogp = term1 +term2
 
         minuslogp = np.dot(dev, cov_red_inv_dev)*(self.Omega/2)
@@ -3869,23 +3870,23 @@ cdef class Spp(SIR_type):
         """
 
         fi=self.fi
-        no_reduced_params = dp.shape[1]
-        assert self.no_inferred_params == dp.shape[0]
+        no_reduced_params = dp.shape[0]
+        assert self.no_inferred_params == dp.shape[1]
         param_values = np.ravel(self.parameters)
 
         def integrand(t):
             n = np.size(t)
-            f = np.empty((self.dim, no_reduced_params, n), dtype=DTYPE)
+            f = np.empty((no_reduced_params, self.dim, n), dtype=DTYPE)
             for i in range(n):
                 x = x_sol(t[i])/self.Omega
                 U =  U_sol(t[i]).reshape((self.dim, self.dim)) # transpose of U(t, Tf)
                 CM_f = np.ravel(self.contactMatrix(t[i]))
                 dAdp, _ = self.dA(param_values, CM_f, fi, x)
                 # dAdp of shape (no_reduced_params, self.dim)
-                f[:, :, i] = U.T@np.array(dAdp).T@dp 
+                f[:, :, i] = dp@np.array(dAdp)@U
             return f
 
-        fshape = (self.dim, no_reduced_params)
+        fshape = (no_reduced_params, self.dim)
         time_series = np.zeros((Nf, *fshape), dtype=DTYPE)
         time_points = np.linspace(0, Tf, Nf)
         val = np.zeros(fshape, dtype=DTYPE)
@@ -3893,25 +3894,25 @@ cdef class Spp(SIR_type):
             ti = time_points[i-1]
             tf = time_points[i]
             U_sol = self._obtain_full_backward_time_evol_op(x_sol, ti, tf)
-            U = U_sol(ti).reshape((self.dim, self.dim)).T
-            val = np.dot(U, val)
+            U = U_sol(ti).reshape((self.dim, self.dim))
+            val = val@U
             time_series[i] = np.add(val, pyross.utils.quadrature(integrand, ti, tf, fshape, rtol=rtol))
             val = time_series[i]
         return time_series
 
     def dmudx0(self, x_sol, Tf, Nf, dx0):
-        cdef Py_ssize_t xdim = dx0.shape[1], dim=self.dim
-        assert dx0.shape[0]==dim
+        cdef Py_ssize_t xdim = dx0.shape[0], dim=self.dim
+        assert dx0.shape[1]==dim
         def rhs(t, U_vec):
             xt = x_sol(t)/self.Omega
             self.compute_jacobian_and_b_matrix(xt, t, b_matrix=False, jacobian=True)
-            U_mat = np.reshape(U_vec, (dim, xdim))
-            dUdt = np.dot(self.J_mat, U_mat) #
+            U_mat = np.reshape(U_vec, (xdim, dim))
+            dUdt = np.dot(U_mat, self.J_mat.T) #
             return np.ravel(dUdt)
 
-        U0 = (np.identity((self.dim))@dx0).flatten()
+        U0 = (dx0@np.identity((self.dim))).flatten()
         time_points = np.linspace(0, Tf, Nf)
-        dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, t_eval=time_points).y.T.reshape((Nf, dim, xdim))
+        dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, t_eval=time_points).y.T.reshape((Nf, xdim, dim))
         return dmudx0
 
     cpdef obtain_full_mean_cov_derivatives(self, x_sol, Tf, Nf, dx0, dp, rtol=1e-4):
@@ -3921,15 +3922,15 @@ cdef class Spp(SIR_type):
         cdef:
             Py_ssize_t dim=self.dim, full_dim = (Nf-1)*dim
             Py_ssize_t nparams, nx0, ntotal
-        nparams = dp.shape[1]
-        nx0 = dx0.shape[1]
+        nparams = dp.shape[0]
+        nx0 = dx0.shape[0]
         ntotal = nparams + nx0
         flat_params = np.ravel(self.parameters)
 
-        dfullcovdp = np.zeros((Nf-1, dim, Nf-1, dim, ntotal), dtype=DTYPE)
+        dfullcovdp = np.zeros((ntotal, Nf-1, dim, Nf-1, dim), dtype=DTYPE)
         fullcov = np.zeros((Nf-1, dim, Nf-1, dim), dtype=DTYPE)
         cov = np.zeros((dim, dim), dtype=DTYPE)
-        dcov = np.zeros((dim, dim, ntotal), dtype=DTYPE)
+        dcov = np.zeros((ntotal, dim, dim), dtype=DTYPE)
 
         dxdp = self.dmudp(x_sol, Tf, Nf, dp, rtol=rtol)
         dxdx0 = self.dmudx0(x_sol, Tf, Nf, dx0)
@@ -3947,16 +3948,12 @@ cdef class Spp(SIR_type):
            dBdp, dBdx = self.dB(flat_params, CM_f, self.fi, xt)
            dJdp, dJdx = self.dJ(flat_params, CM_f, self.fi, xt)
 
-           dcond_covdp = dt*np.add(np.einsum('lij,lm->mij', dBdp, dp), np.einsum('kij,kl->lij', dBdx, dxtdp))
-           dcond_covdx0 = dt*np.einsum('kij,kl->lij', dBdx, dxtdx0)
+           dcond_covdp = dt*np.add(np.einsum('ml,lij->mij', dp, dBdp), np.einsum('lk,kij->lij', dxtdp, dBdx))
+           dcond_covdx0 = dt*np.einsum('lk,kij->lij', dxtdx0, dBdx)
            dcond_cov = np.concatenate([dcond_covdp, dcond_covdx0], axis=0)
-           dUdp =dt*np.add(np.einsum('lij,lm->mij', dJdp, dp), np.einsum('kij,kl->lij', dJdx, dxtdp))
-           dUdx0 = dt*np.einsum('kij,kl->lij', dJdx, dxtdx0)
+           dUdp =dt*np.add(np.einsum('ml,lij->mij', dp, dJdp), np.einsum('lk,kij->lij', dxtdp, dJdx))
+           dUdx0 = dt*np.einsum('lk,kij->lij', dxtdx0, dJdx)
            dU = np.concatenate([dUdp, dUdx0], axis=0)
-
-           # Transpose such that dU_ijk = dU_ij / dp_k
-           dU = np.transpose(dU, axes=[1, 2, 0])
-           dcond_cov = np.transpose(dcond_cov, axes=[1, 2, 0])
 
            # Compute the elements
            self.compute_jacobian_and_b_matrix(xt, t, b_matrix=True, jacobian=True)
@@ -3964,30 +3961,30 @@ cdef class Spp(SIR_type):
            U = np.add(np.identity(self.dim), np.multiply(dt, self.J_mat))
 
            # compute dcov and cov
-           temp = np.einsum('ijl,jk,km->iml', dU, cov, U.T)
-           tempT = np.transpose(temp, axes=[1, 0, 2])
-           dcov = np.einsum('ij,jkl,km->iml', U, dcov, U.T) + temp + tempT + dcond_cov
+           temp = np.einsum('lij,jm->lim', dU, cov@U.T)
+           tempT = np.transpose(temp, axes=[0, 2, 1])
+           dcov = np.einsum('ij,ljk,km->lim', U, dcov, U.T) + temp + tempT + dcond_cov
            cov = U@cov@U.T + cond_cov
 
            # Fill entries of dfullcovdp
-           dfullcovdp[i, :, i, :, :] = dcov
+           dfullcovdp[:, i, :, i, :] = dcov
            fullcov[i, :, i, :] = cov
            if i>0:
                for j in range(0, i):
                    element  = fullcov[j, :, i-1, :]
-                   temp = np.einsum('ijl,kj->ikl', dfullcovdp[j, :, i-1, :, :], U)
-                   temp += np.einsum('ij,kjl->ikl', element, dU)
-                   dfullcovdp[j, :, i, :, :] = temp
-                   dfullcovdp[i, :, j, :, :] = np.transpose(temp, axes=[1, 0, 2])
+                   temp = dfullcovdp[:, j, :, i-1, :]@U.T
+                   temp += np.einsum('ij,lkj->lik', element, dU)
+                   dfullcovdp[:, j, :, i, :] = temp
+                   dfullcovdp[:, i, :, j, :] = np.transpose(temp, axes=[0, 2, 1])
                    element = element@U.T
                    fullcov[j, :, i, :] = element
                    fullcov[i, :, j, :] = element.T
         fullcov_mat = np.reshape(fullcov, (full_dim, full_dim))
-        dfullcov_mat = np.reshape(dfullcovdp, (full_dim, full_dim, ntotal))
+        dfullcov_mat = np.reshape(dfullcovdp, (ntotal, full_dim, full_dim))
 
-        dxdp = dxdp[1:].reshape((full_dim, dxdp.shape[2]))
-        dxdx0 = dxdx0[1:].reshape((full_dim, dxdx0.shape[2]))
-        dx = np.concatenate([dxdp, dxdx0], axis=1)
+        dxdp = np.transpose(dxdp[1:], axes=[1, 0, 2]).reshape((nparams, full_dim))
+        dxdx0 = np.transpose(dxdx0[1:], axes=[1, 0, 2]).reshape((nx0, full_dim))
+        dx = np.concatenate([dxdp, dxdx0], axis=0)
 
         return dx, dfullcov_mat, fullcov_mat
 
@@ -4685,8 +4682,6 @@ cdef class SppQ(SIR_type):
                 if self.constant_terms.size > 0:
                     J[nClass-1,  m, nClassUwoN, n] -= term3
                 J[nClass-1,  m, nClass-1, n] += term3
-
-
 
         self.J_mat = self.J.reshape((dim, dim))
 
