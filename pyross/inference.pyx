@@ -2169,12 +2169,21 @@ cdef class SIR_type:
         return -minus_loglike
 
     def nested_sampling_latent_infer_control(self, obs, fltr, Tf, generator, param_priors,
-                                         init_priors, intervention_fun=None, tangent=False, verbose=False, queue_size=1,
-                                         max_workers=None, npoints=100, method='single', max_iter=1000, dlogz=None,
-                                         decline_factor=None):
+                                         init_priors, intervention_fun=None, tangent=False, verbose=False, nprocesses=0, 
+                                         queue_size=None, maxiter=None, maxcall=None, dlogz=None, n_effective=None, 
+                                         add_live=True, sampler=None, **dynesty_args):
+        if dynesty is None:
+            raise Exception("Nested sampling needs optional dependency `dynesty` which was not found.")
 
-        if nestle is None:
-            raise Exception("Nested sampling needs optional dependency `nestle` which was not found.")
+        if nprocesses == 0:
+            if pathos_mp:
+                # Optional dependecy for multiprocessing (pathos) is installed.
+                nprocesses = pathos_mp.cpu_count()
+            else:
+                nprocesses = 1
+
+        if queue_size is None:
+            queue_size = nprocesses
 
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
 
@@ -2195,27 +2204,70 @@ cdef class SIR_type:
 
         s, scale = pyross.utils.make_log_norm_dist(guess, stds)
 
-        k = len(guess)
-        ppf_bounds = np.zeros((k, 2))
-        ppf_bounds[:,0] = lognorm.cdf(bounds[:,0], s, scale=scale)
-        ppf_bounds[:,1] = lognorm.cdf(bounds[:,1], s, scale=scale)
-        ppf_bounds[:,1] = ppf_bounds[:,1] - ppf_bounds[:,0]
-
-        prior_transform_args = {'s':s, 'scale':scale, 'ppf_bounds':ppf_bounds}
+        ndim = len(guess)
+        prior_transform_args = {'s':s, 'scale':scale}
         loglike_args = {'generator':generator, 'intervention_fun':intervention_fun, 
                         'param_keys':keys, 'param_guess_range':param_guess_range,
                         'is_scale_parameter':is_scale_parameter, 'scaled_param_guesses':scaled_param_guesses,
                         'param_length':param_length, 'obs':obs, 'fltr':fltr, 'Tf':Tf, 'obs0':obs0,
-                        'init_flags':init_flags, 'init_fltrs': init_fltrs, 'tangent':tangent}
+                        'init_flags':init_flags, 'init_fltrs': init_fltrs, 'tangent':tangent, 'bounds':bounds}
 
-        result = nested_sampling(self._loglike_latent_control, self._nested_sampling_prior_transform, k, queue_size,
-                                 max_workers, verbose, method, npoints, max_iter, dlogz, decline_factor, loglike_args,
-                                 prior_transform_args)
+        if sampler is None:
+            if nprocesses > 1:
+                pool = pathos_mp.ProcessingPool(nprocesses)
+                sampler = dynesty.NestedSampler(self._loglike_latent_control, self._nested_sampling_prior_transform, 
+                                                ndim=ndim, logl_kwargs=loglike_args, ptform_kwargs=prior_transform_args, 
+                                                pool=pool, queue_size=queue_size, **dynesty_args)
+            else:
+                sampler = dynesty.NestedSampler(self._loglike_latent_control, self._nested_sampling_prior_transform, 
+                                                ndim=ndim, logl_kwargs=loglike_args, ptform_kwargs=prior_transform_args, 
+                                                **dynesty_args)
+        else:
+            if nprocesses > 1:
+                # Restart the pool we closed at the end of the previous run.
+                sampler.pool = pathos_mp.ProcessingPool(nprocesses)
+                sampler.M = sampler.pool.map
+            elif sampler.pool is not None:
+                sampler.pool = None
+                sampler.M = map
 
+        sampler.run_nested(maxiter=maxiter, maxcall=maxcall, dlogz=dlogz, n_effective=n_effective, 
+                           add_live=add_live, print_progress=verbose)
+
+        if sampler.pool is not None:
+            sampler.pool.close()
+            sampler.pool.join()
+            sampler.pool.clear()
+
+        return sampler
+
+
+    def nested_sampling_latent_infer_control_process_result(self, sampler, obs, fltr, generator, param_priors, 
+                                                            init_priors, intervention_fun=None):
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+
+        # Read in parameter priors
+        keys, param_guess, param_stds, param_bounds, param_guess_range, \
+        is_scale_parameter, scaled_param_guesses \
+            = pyross.utils.parse_param_prior_dict(param_priors, self.M)
+
+        # Read in initial conditions priors
+        init_guess, init_stds, init_bounds, init_flags, init_fltrs \
+            = pyross.utils.parse_init_prior_dict(init_priors, self.dim, len(obs0))
+
+        # Concatenate the flattend parameter guess with init guess
+        param_length = param_guess.shape[0]
+        guess = np.concatenate([param_guess, init_guess]).astype(DTYPE)
+        stds = np.concatenate([param_stds,init_stds]).astype(DTYPE)
+        bounds = np.concatenate([param_bounds, init_bounds], axis=0).astype(DTYPE)
+
+        s, scale = pyross.utils.make_log_norm_dist(guess, stds)
+
+        result = sampler.results
         output_samples = []
         for i in range(len(result.samples)):
             sample = result.samples[i]
-            weight = result.weights[i]
+            weight = np.exp(result.logwt[i] - result.logz[len(result.logz)-1])
             l_like = result.logl[i]
             param_estimates = sample[:param_length]
             orig_params = pyross.utils.unflatten_parameters(param_estimates,
