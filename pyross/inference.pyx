@@ -18,9 +18,9 @@ import hashlib
 
 try:
     # Optional support for nested sampling.
-    import nestle
+    import dynesty
 except ImportError:
-    nestle = None
+    dynesty = None
 
 try:
     # Optional support for nested sampling.
@@ -37,7 +37,7 @@ except ImportError:
 import pyross.deterministic
 cimport pyross.deterministic
 import pyross.contactMatrix
-from pyross.utils_python import minimization, nested_sampling
+from pyross.utils_python import minimization
 from libc.math cimport sqrt, log, INFINITY
 cdef double PI = 3.14159265359
 
@@ -118,7 +118,7 @@ cdef class SIR_type:
                         tangent=False, verbose=False,
                         enable_global=True, global_max_iter=100, global_atol=1,
                         enable_local=True, local_max_iter=200, ftol=1e-6,
-                        cma_processes=0, cma_population=16):
+                        cma_processes=0, cma_population=16, cma_random_seed=None):
         """Infers the MAP estimates for epidemiological parameters
 
         Parameters
@@ -150,6 +150,8 @@ cdef class SIR_type:
         cma_population: int, optional
             he number of samples used in each step of the CMA algorithm.
             Should ideally be factor of `cma_processes`.
+        cma_random_seed: int (between 0 and 2**32-1)
+            Random seed for the optimisation algorithms. By default it is generated from numpy.random.randint.
         local_max_iter: int, optional
             The maximum number of iterations for the local algorithm.
         ftol: float, optional
@@ -203,7 +205,7 @@ cdef class SIR_type:
                            enable_global=enable_global, enable_local=enable_local,
                            cma_processes=cma_processes,
                            cma_population=cma_population, cma_stds=cma_stds,
-                           verbose=verbose, args_dict=minimize_args)
+                           verbose=verbose, cma_random_seed=cma_random_seed, args_dict=minimize_args)
         params = res[0]
         # Get the parameters (in their original structure) from the flattened parameter vector.
         orig_params = pyross.utils.unflatten_parameters(params, flat_guess_range,
@@ -243,22 +245,15 @@ cdef class SIR_type:
 
         return -minus_loglike
 
-    def _nested_sampling_prior_transform(self, x, s=None, scale=None, ppf_bounds=None):
-        # Tranform a sample x ~ Unif([0,1]^d) to a sample of the prior using inverse tranform sampling.
-        y = ppf_bounds[:,0] + x * ppf_bounds[:,1]
-        return lognorm.ppf(y, s, scale=scale)
+    def _nested_sampling_prior_transform(self, x, s=None, scale=None):
+        return lognorm.ppf(x, s, scale=scale)
 
     def nested_sampling_inference(self, x, Tf, contactMatrix, prior_dict, tangent=False, verbose=False,
-                                  queue_size=1, max_workers=None, npoints=100, method='single', max_iter=1000,
-                                  dlogz=None, decline_factor=None):
+                                  nprocesses=0, queue_size=None, maxiter=None, maxcall=None, dlogz=None,
+                                  n_effective=None, add_live=True, sampler=None, **dynesty_args):
         '''Compute the log-evidence and weighted samples of the a-posteriori distribution of the parameters of a SIR type model
-        using nested sampling as implemented in the `nestle` Python package. This function assumes that full data on
+        using nested sampling as implemented in the `dynesty` Python package. This function assumes that full data on
         all classes is available.
-
-        This function provides a computational alterantive to `log_G_evidence` and `infer_parameters`. It does not use
-        the Laplace approximation to compute the evidence and, in addition,  returns a set of representative samples that can
-        be used to compute a posterior mean estimate (insted of the MAP estimate). This approach approach is much more resource
-        intensive and typically only viable for small models or tangent space inference.
 
         Parameters
         ----------
@@ -275,64 +270,124 @@ cdef class SIR_type:
             Set to True to do inference in tangent space (might be less robust but a lot faster). Default is False.
         verbose: bool, optional
             Set to True to see intermediate outputs from the nested sampling procedure.
-        queue_size: int
-            Size of the internal queue of samples of the nested sampling algorithm. The log-likelihood of these samples
-            is computed in parallel (if queue_size > 1).
-        max_workers: int
-            The maximal number of processes used to compute samples.
-        npoints: int
-            Argument of `nestle.sample`. The number of active points used in the nested sampling algorithm. The higher the
-            number the more accurate and expensive is the evidence computation.
-        method: str
-            Nested sampling method used int `nestle.sample`, see their documentation. Default is `single`, for multimodel posteriors,
-            use `multi`.
-        max_iter: int
-            Maximum number of iterations of the nested sampling algorithm.
+        nprocesses: int, optional
+            The number of processes used for parallel evaluation of the likelihood.
+        queue_size: int, optional
+            Size of internal queue of likelihood values, default is nprocesses if multiprocessing is used.
+        maxiter: int, optional
+            The maximum number of iterations. Default is no limit.
+        maxcall:int, optional
+            The maximum number of calls to the likelihood function. Default no limit.
         dlogz: float, optional
-            Stopping threshold for the estimated error of the log-evidence. This option is mutually exclusive with `decline_factor`.
-        decline_factor: float, optional
-            Stop the iteration when the weight (likelihood times prior volume) of newly saved samples has been declining for
-            `decline_factor * nsamples` consecutive samples. This option is mutually exclusive with `dlogz`.
+            The iteration terminates if the estimated contribution of the remaining prior volume to the total evidence 
+            falls below this threshold. Default value is `1e-3 * (nlive - 1) + 0.01` if `add_live==True`, 0.01 otherwise.
+        n_effective: float, optional
+            The iteration terminates if the number of effective posterior samples reaches this values. Default is no limit.
+        add_live: bool, optional
+            Determines whether to add the remaining set of live points to the set of samples. Default is True.
+        sampler: dynesty.NestedSampler, optional
+            Continue running an instance of a nested sampler until the termination criteria are met.
+        **dynesty_args
+            Arguments passed through to the construction of the dynesty.NestedSampler constructor. Relevant entries
+            are (this is not comprehensive, for details see the documentation of dynesty):
+            nlive: int, optional
+                The number of live points. Default is 500.
+            bound: {'none', 'single', 'multi', 'balls', 'cubes'}, optional
+                Method used to approximately bound the prior using the current set of live points. Default is 'multi'.
+            sample:  {'auto', 'unif', 'rwalk', 'rstagger', 'slice', 'rslice', 'hslice', callable}, optional
+                Method used to sample uniformly within the likelihood constraint, conditioned on the provided bounds.
 
         Returns
         -------
-        result:
-            The result of the nested sampling algorithm as returned by `nestle.nested_sampling`. The approximated evidence can
-            be accessed by `result.logz`.
-        samples: dict
-            A set of weighted samples approximating the posterios distribution. Use `pyross.utils.posterior_mean` to compute
-            the posterior mean and `pyross.utils.resample` to sample from the weighted set.
+        sampler: dynesty.NestedSampler
+            The state of the sampler after termination of the nested sampling run.
         '''
 
-        if nestle is None:
-            raise Exception("Nested sampling needs optional dependency `nestle` which was not found.")
+        if dynesty is None:
+            raise Exception("Nested sampling needs optional dependency `dynesty` which was not found.")
+
+        if nprocesses == 0:
+            if pathos_mp:
+                # Optional dependecy for multiprocessing (pathos) is installed.
+                nprocesses = pathos_mp.cpu_count()
+            else:
+                nprocesses = 1
+
+        if queue_size is None:
+            queue_size = nprocesses
 
         keys, guess, stds, bounds, flat_guess_range, is_scale_parameter, scaled_guesses \
             = pyross.utils.parse_param_prior_dict(prior_dict, self.M)
         s, scale = pyross.utils.make_log_norm_dist(guess, stds)
         self.contactMatrix = contactMatrix
 
-        k = len(guess)
-        # We sample the prior by inverse transform sampling from the unite cube. To implement bounds (if supplied)
-        # we shrink the unit cube according the the provided bounds in each dimension.
-        ppf_bounds = np.zeros((k, 2))
-        ppf_bounds[:,0] = lognorm.cdf(bounds[:,0], s, scale=scale)
-        ppf_bounds[:,1] = lognorm.cdf(bounds[:,1], s, scale=scale)
-        ppf_bounds[:,1] = ppf_bounds[:,1] - ppf_bounds[:,0]
-
-        prior_transform_args = {'s':s, 'scale':scale, 'ppf_bounds':ppf_bounds}
+        ndim = len(guess)
+        prior_transform_args = {'s':s, 'scale':scale}
         loglike_args = {'keys':keys, 'is_scale_parameter':is_scale_parameter,
                        'scaled_guesses':scaled_guesses, 'flat_guess_range':flat_guess_range,
-                       'x':x, 'Tf':Tf, 'tangent':tangent}
+                       'x':x, 'Tf':Tf, 'tangent':tangent, 'bounds':bounds}
 
-        result = nested_sampling(self._loglike, self._nested_sampling_prior_transform, k, queue_size,
-                                 max_workers, verbose, method, npoints, max_iter, dlogz, decline_factor, loglike_args,
-                                 prior_transform_args)
+        if sampler is None:
+            if nprocesses > 1:
+                pool = pathos_mp.ProcessingPool(nprocesses)
+                sampler = dynesty.NestedSampler(self._loglike, self._nested_sampling_prior_transform, ndim=ndim, 
+                                                logl_kwargs=loglike_args, ptform_kwargs=prior_transform_args, 
+                                                pool=pool, queue_size=queue_size, **dynesty_args)
+            else:
+                sampler = dynesty.NestedSampler(self._loglike, self._nested_sampling_prior_transform, ndim=ndim, 
+                                                logl_kwargs=loglike_args, ptform_kwargs=prior_transform_args, 
+                                                **dynesty_args)
+        else:
+            if nprocesses > 1:
+                # Restart the pool we closed at the end of the previous run.
+                sampler.pool = pathos_mp.ProcessingPool(nprocesses)
+                sampler.M = sampler.pool.map
+            elif sampler.pool is not None:
+                sampler.pool = None
+                sampler.M = map
 
+        sampler.run_nested(maxiter=maxiter, maxcall=maxcall, dlogz=dlogz, n_effective=n_effective, 
+                           add_live=add_live, print_progress=verbose)
+
+        if sampler.pool is not None:
+            sampler.pool.close()
+            sampler.pool.join()
+            sampler.pool.clear()
+
+        return sampler
+
+    def nested_sampling_inference_process_result(self, sampler, prior_dict):
+        """
+        Take the sampler generated by `nested_sampling_inference` and produce output dictionaries for further use
+        in the pyross framework.
+
+        Parameters
+        ----------
+        sampler: dynesty.NestedSampler
+            Output of `nested_sampling_inference`.
+        param_priors: dict
+            A dictionary for priors for the model parameters.
+            See `infer_parameters` for further explanations.
+
+        Returns
+        -------
+        result: dynesty.Result
+            The result of the nested sampling iteration. Relevant entries include:
+            result.logz: list
+                The progression of log-evidence estimates, use result.logz[-1] for the final estimate.
+        output_samples: list
+            The processed weighted posterior samples.
+        """
+
+        keys, guess, stds, bounds, flat_guess_range, is_scale_parameter, scaled_guesses \
+            = pyross.utils.parse_param_prior_dict(prior_dict, self.M)
+        s, scale = pyross.utils.make_log_norm_dist(guess, stds)
+
+        result = sampler.results
         output_samples = []
         for i in range(len(result.samples)):
             sample = result.samples[i]
-            weight = result.weights[i]
+            weight = np.exp(result.logwt[i] - result.logz[len(result.logz)-1])
             l_like = result.logl[i]
 
             orig_sample = pyross.utils.unflatten_parameters(sample, flat_guess_range,
@@ -572,7 +627,7 @@ cdef class SIR_type:
                       verbose=False, ftol=1e-6,
                       global_max_iter=100, local_max_iter=100, global_atol=1.,
                       enable_global=True, enable_local=True,
-                      cma_processes=0, cma_population=16):
+                      cma_processes=0, cma_population=16, cma_random_seed=None):
         """
         Compute the maximum a-posteriori (MAP) estimate of the change of control parameters for a SIR type model in
         lockdown. The lockdown is modelled by scaling the contact matrices for contact at work, school, and other
@@ -621,6 +676,8 @@ cdef class SIR_type:
             Number of parallel processes used for global optimisation.
         cma_population: int, optional
             The number of samples used in each step of the CMA algorithm.
+        cma_random_seed: int (between 0 and 2**32-1)
+            Random seed for the optimisation algorithms. By default it is generated from numpy.random.randint.
 
         Returns
         -------
@@ -646,7 +703,7 @@ cdef class SIR_type:
         res = minimization(self._infer_control_to_minimize, guess, bounds, ftol=ftol, global_max_iter=global_max_iter,
                            local_max_iter=local_max_iter, global_atol=global_atol,
                            enable_global=enable_global, enable_local=enable_local, cma_processes=cma_processes,
-                           cma_population=cma_population, cma_stds=cma_stds, verbose=verbose, args_dict=minimize_args)
+                           cma_population=cma_population, cma_stds=cma_stds, verbose=verbose, args_dict=minimize_args, cma_random_seed=cma_random_seed)
 
         orig_params = pyross.utils.unflatten_parameters(res[0], flat_guess_range,
                                              is_scale_parameter, scaled_guesses)
@@ -1216,7 +1273,7 @@ cdef class SIR_type:
                             double ftol=1e-5,
                             global_max_iter=100, local_max_iter=100, global_atol=1,
                             enable_global=True, enable_local=True, cma_processes=0,
-                            cma_population=16):
+                            cma_population=16, cma_random_seed=None):
         """
         Compute the maximum a-posteriori (MAP) estimate of the parameters and the initial conditions of a SIR type model
         when the classes are only partially observed. Unobserved classes are treated as latent variables.
@@ -1257,6 +1314,8 @@ cdef class SIR_type:
         cma_population: int, optional
             he number of samples used in each step of the CMA algorithm.
             Should ideally be factor of `cma_processes`.
+        cma_random_seed: int (between 0 and 2**32-1)
+            Random seed for the optimisation algorithms. By default it is generated from numpy.random.randint.
         local_max_iter: int, optional
             The maximum number of iterations for the local algorithm.
         ftol: float, optional
@@ -1373,7 +1432,7 @@ cdef class SIR_type:
                            enable_global=enable_global, enable_local=enable_local,
                            cma_processes=cma_processes,
                            cma_population=cma_population, cma_stds=cma_stds,
-                           verbose=verbose, args_dict=minimize_args)
+                           verbose=verbose, args_dict=minimize_args, cma_random_seed=cma_random_seed)
 
         estimates = res[0]
 
@@ -1432,15 +1491,11 @@ cdef class SIR_type:
         return -minus_loglike
 
     def nested_sampling_latent_inference(self, np.ndarray obs, np.ndarray fltr, double Tf, contactMatrix, param_priors,
-                                         init_priors,tangent=False, verbose=False, queue_size=1,
-                                         max_workers=None, npoints=100, method='single', max_iter=1000, dlogz=None,
-                                         decline_factor=None):
+                                         init_priors,tangent=False, verbose=False, nprocesses=0, queue_size=None, 
+                                         maxiter=None, maxcall=None, dlogz=None, n_effective=None, add_live=True, 
+                                         sampler=None, **dynesty_args):
         '''Compute the log-evidence and weighted samples of the a-posteriori distribution of the parameters of a SIR type model
-        with latent variables using nested sampling as implemented in the `nestle` Python package.
-
-        This function provides a computational alterantive to `latent_infer_parameters`. It computes an estimate of the evidence and,
-        in addition, returns a set of representative samples that can be used to compute a posterior mean estimate (insted of the MAP
-        estimate). This approach approach is much more resource intensive and typically only viable for small models or tangent space inference.
+        with latent variables using nested sampling as implemented in the `dynesty` Python package.
 
         Parameters
         ----------
@@ -1464,37 +1519,51 @@ cdef class SIR_type:
             Set to True to do inference in tangent space (might be less robust but a lot faster). Default is False.
         verbose: bool, optional
             Set to True to see intermediate outputs from the nested sampling procedure.
-        queue_size: int
-            Size of the internal queue of samples of the nested sampling algorithm. The log-likelihood of these samples
-            is computed in parallel (if queue_size > 1).
-        max_workers: int
-            The maximal number of processes used to compute samples.
-        npoints: int
-            Argument of `nestle.sample`. The number of active points used in the nested sampling algorithm. The higher the
-            number the more accurate and expensive is the evidence computation.
-        method: str
-            Nested sampling method used int `nestle.sample`, see their documentation. Default is `single`, for multimodel posteriors,
-            use `multi`.
-        max_iter: int
-            Maximum number of iterations of the nested sampling algorithm.
+        nprocesses: int, optional
+            The number of processes used for parallel evaluation of the likelihood.
+        queue_size: int, optional
+            Size of internal queue of likelihood values, default is nprocesses if multiprocessing is used.
+        maxiter: int, optional
+            The maximum number of iterations. Default is no limit.
+        maxcall:int, optional
+            The maximum number of calls to the likelihood function. Default no limit.
         dlogz: float, optional
-            Stopping threshold for the estimated error of the log-evidence. This option is mutually exclusive with `decline_factor`.
-        decline_factor: float, optional
-            Stop the iteration when the weight (likelihood times prior volume) of newly saved samples has been declining for
-            `decline_factor * nsamples` consecutive samples. This option is mutually exclusive with `dlogz`.
+            The iteration terminates if the estimated contribution of the remaining prior volume to the total evidence 
+            falls below this threshold. Default value is `1e-3 * (nlive - 1) + 0.01` if `add_live==True`, 0.01 otherwise.
+        n_effective: float, optional
+            The iteration terminates if the number of effective posterior samples reaches this values. Default is no limit.
+        add_live: bool, optional
+            Determines whether to add the remaining set of live points to the set of samples. Default is True.
+        sampler: dynesty.NestedSampler, optional
+            Continue running an instance of a nested sampler until the termination criteria are met.
+        **dynesty_args
+            Arguments passed through to the construction of the dynesty.NestedSampler constructor. Relevant entries
+            are (this is not comprehensive, for details see the documentation of dynesty):
+            nlive: int, optional
+                The number of live points. Default is 500.
+            bound: {'none', 'single', 'multi', 'balls', 'cubes'}, optional
+                Method used to approximately bound the prior using the current set of live points. Default is 'multi'.
+            sample:  {'auto', 'unif', 'rwalk', 'rstagger', 'slice', 'rslice', 'hslice', callable}, optional
+                Method used to sample uniformly within the likelihood constraint, conditioned on the provided bounds.
 
         Returns
         -------
-        result:
-            The result of the nested sampling algorithm as returned by `nestle.nested_sampling`. The approximated log-evidence
-            can be accessed by `result.logz`.
-        samples: dict
-            A set of weighted samples approximating the posterior distribution. Use `pyross.utils.posterior_mean` to compute
-            the posterior mean and `pyross.utils.resample` to sample from the weighted set.
+        sampler: dynesty.NestedSampler
+            The state of the sampler after termination of the nested sampling run.
         '''
 
-        if nestle is None:
-            raise Exception("Nested sampling needs optional dependency `nestle` which was not found.")
+        if dynesty is None:
+            raise Exception("Nested sampling needs optional dependency `dynesty` which was not found.")
+
+        if nprocesses == 0:
+            if pathos_mp:
+                # Optional dependecy for multiprocessing (pathos) is installed.
+                nprocesses = pathos_mp.cpu_count()
+            else:
+                nprocesses = 1
+
+        if queue_size is None:
+            queue_size = nprocesses
 
         self.contactMatrix = contactMatrix
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
@@ -1516,26 +1585,98 @@ cdef class SIR_type:
 
         s, scale = pyross.utils.make_log_norm_dist(guess, stds)
 
-        k = len(guess)
-        ppf_bounds = np.zeros((k, 2))
-        ppf_bounds[:,0] = lognorm.cdf(bounds[:,0], s, scale=scale)
-        ppf_bounds[:,1] = lognorm.cdf(bounds[:,1], s, scale=scale)
-        ppf_bounds[:,1] = ppf_bounds[:,1] - ppf_bounds[:,0]
+        ndim = len(guess)
 
-        prior_transform_args = {'s':s, 'scale':scale, 'ppf_bounds':ppf_bounds}
+        prior_transform_args = {'s':s, 'scale':scale}
         loglike_args = {'param_keys':keys, 'param_guess_range':param_guess_range,
                         'is_scale_parameter':is_scale_parameter, 'scaled_param_guesses':scaled_param_guesses,
                         'param_length':param_length, 'obs':obs, 'fltr':fltr, 'Tf':Tf, 'obs0':obs0,
-                        'init_flags':init_flags, 'init_fltrs': init_fltrs, 'tangent':tangent}
+                        'init_flags':init_flags, 'init_fltrs': init_fltrs, 'tangent':tangent, 'bounds':bounds}
 
-        result = nested_sampling(self._loglike_latent, self._nested_sampling_prior_transform, k, queue_size,
-                                 max_workers, verbose, method, npoints, max_iter, dlogz, decline_factor, loglike_args,
-                                 prior_transform_args)
+        if sampler is None:
+            if nprocesses > 1:
+                pool = pathos_mp.ProcessingPool(nprocesses)
+                sampler = dynesty.NestedSampler(self._loglike_latent, self._nested_sampling_prior_transform, ndim=ndim, 
+                                                logl_kwargs=loglike_args, ptform_kwargs=prior_transform_args, 
+                                                pool=pool, queue_size=queue_size, **dynesty_args)
+            else:
+                sampler = dynesty.NestedSampler(self._loglike_latent, self._nested_sampling_prior_transform, ndim=ndim, 
+                                                logl_kwargs=loglike_args, ptform_kwargs=prior_transform_args, 
+                                                **dynesty_args)
+        else:
+            if nprocesses > 1:
+                # Restart the pool we closed at the end of the previous run.
+                sampler.pool = pathos_mp.ProcessingPool(nprocesses)
+                sampler.M = sampler.pool.map
+            elif sampler.pool is not None:
+                sampler.pool = None
+                sampler.M = map
 
+        sampler.run_nested(maxiter=maxiter, maxcall=maxcall, dlogz=dlogz, n_effective=n_effective, 
+                           add_live=add_live, print_progress=verbose)
+
+        if sampler.pool is not None:
+            sampler.pool.close()
+            sampler.pool.join()
+            sampler.pool.clear()
+
+        return sampler
+
+    def nested_sampling_latent_inference_process_result(self, sampler, obs, fltr, param_priors, init_priors):
+        """
+        Take the sampler generated by `nested_sampling_latent_inference` and produce output dictionaries for further use
+        in the pyross framework.
+
+        Parameters
+        ----------
+        sampler: dynesty.NestedSampler
+            Output of `nested_sampling_latent_inference`.
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        param_priors: dict
+            A dictionary for priors for the model parameters.
+            See `latent_infer_parameters` for further explanations.
+        init_priors: dict
+            A dictionary for priors for the initial conditions.
+            See `latent_infer_parameters` for further explanations.
+
+        Returns
+        -------
+        result: dynesty.Result
+            The result of the nested sampling iteration. Relevant entries include:
+            result.logz: list
+                The progression of log-evidence estimates, use result.logz[-1] for the final estimate.
+        output_samples: list
+            The processed weighted posterior samples.
+        """
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+
+        # Read in parameter priors
+        keys, param_guess, param_stds, param_bounds, param_guess_range, \
+        is_scale_parameter, scaled_param_guesses \
+            = pyross.utils.parse_param_prior_dict(param_priors, self.M)
+
+        # Read in initial conditions priors
+        init_guess, init_stds, init_bounds, init_flags, init_fltrs \
+            = pyross.utils.parse_init_prior_dict(init_priors, self.dim, len(obs0))
+
+        # Concatenate the flattend parameter guess with init guess
+        param_length = param_guess.shape[0]
+        guess = np.concatenate([param_guess, init_guess]).astype(DTYPE)
+        stds = np.concatenate([param_stds,init_stds]).astype(DTYPE)
+        bounds = np.concatenate([param_bounds, init_bounds], axis=0).astype(DTYPE)
+
+        s, scale = pyross.utils.make_log_norm_dist(guess, stds)
+
+        result = sampler.results
         output_samples = []
         for i in range(len(result.samples)):
             sample = result.samples[i]
-            weight = result.weights[i]
+            weight = np.exp(result.logwt[i] - result.logz[len(result.logz)-1])
             l_like = result.logl[i]
             param_estimates = sample[:param_length]
             orig_params = pyross.utils.unflatten_parameters(param_estimates,
@@ -1660,6 +1801,7 @@ cdef class SIR_type:
         if nprocesses > 1 and pathos_mp is None:
             raise Exception("The Python package `pathos` is needed for multiprocessing.")
 
+        self.contactMatrix = contactMatrix
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
 
         # Read in parameter priors
@@ -1863,7 +2005,7 @@ cdef class SIR_type:
                             intervention_fun=None, tangent=False,
                             verbose=False, ftol=1e-5, global_max_iter=100,
                             local_max_iter=100, global_atol=1., enable_global=True,
-                            enable_local=True, cma_processes=0, cma_population=16):
+                            enable_local=True, cma_processes=0, cma_population=16, cma_random_seed=None):
         """
         Compute the maximum a-posteriori (MAP) estimate of the change of control parameters for a SIR type model in
         lockdown with partially observed classes. The unobserved classes are treated as latent variables. The lockdown
@@ -1913,6 +2055,8 @@ cdef class SIR_type:
             Number of parallel processes used for global optimisation.
         cma_population: int, optional
             The number of samples used in each step of the CMA algorithm.
+        cma_random_seed: int (between 0 and 2**32-1)
+            Random seed for the optimisation algorithms. By default it is generated from numpy.random.randint.
 
         Returns
         -------
@@ -1961,7 +2105,7 @@ cdef class SIR_type:
                           enable_global=enable_global, enable_local=enable_local,
                           cma_processes=cma_processes,
                           cma_population=cma_population, cma_stds=cma_stds,
-                          verbose=verbose, args_dict=minimize_args)
+                          verbose=verbose, cma_random_seed=cma_random_seed, args_dict=minimize_args)
         estimates = res[0]
 
         # Get the parameters (in their original structure) from the flattened parameter vector.
@@ -3632,7 +3776,10 @@ cdef class Spp(SIR_type):
     lyapunov_method: str, optional
         The integration method used for the integration of the Lyapunov equation for the covariance.
         Choose one of 'LSODA', 'RK45', 'RK2' and 'euler'. Default is 'LSODA'.
-
+    parameter_mapping: python function, optional
+        A user-defined function that maps the dictionary the parameters used for inference to a dictionary of parameters used in model_spec. Default is an identical mapping.
+    time_dep_param_mapping: python function, optional
+        As parameter_mapping, but time-dependent. The user-defined function takes time as a second argument.
 
     See `SIR_type` for a table of all the methods
 
@@ -3661,23 +3808,44 @@ cdef class Spp(SIR_type):
     cdef:
         readonly np.ndarray constant_terms, linear_terms, infection_terms
         readonly np.ndarray parameters
+        readonly np.ndarray model_parameters
         readonly pyross.deterministic.Spp det_model
         readonly dict model_spec
+        readonly dict param_dict
+        readonly list model_param_keys
+        readonly object parameter_mapping
+        readonly object time_dep_param_mapping
 
 
     def __init__(self, model_spec, parameters, M, fi, Omega=1, steps=4,
-                                    det_method='LSODA', lyapunov_method='LSODA'):
+                                    det_method='LSODA', lyapunov_method='LSODA', parameter_mapping=None, time_dep_param_mapping=None):
+        if parameter_mapping is not None and time_dep_param_mapping is not None:
+            raise Exception('Specify either parameter_mapping or time_dep_param_mapping')
+        self.parameter_mapping = parameter_mapping
+        self.time_dep_param_mapping = time_dep_param_mapping
         self.param_keys = list(parameters.keys())
+        if parameter_mapping is not None:
+            self.model_param_keys = list(parameter_mapping(parameters).keys())
+        elif time_dep_param_mapping is not None:
+            self.param_dict = parameters.copy()
+            self.model_param_keys = list(time_dep_param_mapping(parameters, 0).keys())
+        else:
+            self.model_param_keys = self.param_keys.copy()
         self.model_spec=model_spec
-        res = pyross.utils.parse_model_spec(model_spec, self.param_keys)
+        res = pyross.utils.parse_model_spec(model_spec, self.model_param_keys)
         self.nClass = res[0]
         self.class_index_dict = res[1]
         self.constant_terms = res[2]
         self.linear_terms = res[3]
         self.infection_terms = res[4]
         super().__init__(parameters, self.nClass, M, fi, Omega, steps, det_method, lyapunov_method)
-        self.det_model = pyross.deterministic.Spp(model_spec, parameters, M, fi*Omega)
-
+        if self.parameter_mapping is not None:
+            parameters = self.parameter_mapping(parameters)
+        if self.time_dep_param_mapping is not None:
+            self.det_model = pyross.deterministic.Spp(model_spec, parameters, M, fi*Omega, time_dep_param_mapping=time_dep_param_mapping)
+        else:
+            self.det_model = pyross.deterministic.Spp(model_spec, parameters, M, fi*Omega)
+ 
     def infection_indices(self):
         cdef Py_ssize_t a = 100
         indices = set()
@@ -3710,10 +3878,40 @@ cdef class Spp(SIR_type):
                 param = parameters[key]
                 self.parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
         except KeyError:
-            raise Exception('The parameters passed does not contain certain keys. The keys are {}'.format(self.param_keys))
+            raise Exception('The parameters passed do not contain certain keys. The keys are {}'.format(self.param_keys))
+        if self.parameter_mapping is not None:
+            model_parameters = self.parameter_mapping(parameters)
+            nParams = len(self.model_param_keys)
+            self.model_parameters = np.empty((nParams, self.M), dtype=DTYPE)
+            try:
+                for (i, key) in enumerate(self.model_param_keys):
+                    param = model_parameters[key]
+                    self.model_parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
+            except KeyError:
+                raise Exception('The parameters returned by parameter_mapping(...) do not contain certain keys. The keys are {}'.format(self.model_param_keys))
+        elif self.time_dep_param_mapping is not None:
+            self.param_dict = parameters.copy()
+            self.set_time_dep_model_parameters(0)
+        else:
+            self.model_parameters = self.parameters.copy()
 
+    def set_time_dep_model_parameters(self, tt):
+        model_parameters = self.time_dep_param_mapping(self.param_dict, tt)
+        nParams = len(self.model_param_keys)
+        self.model_parameters = np.empty((nParams, self.M), dtype=DTYPE)
+        try:
+            for (i, key) in enumerate(self.model_param_keys):
+                param = model_parameters[key]
+                self.model_parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
+        except KeyError:
+            raise Exception('The parameters passed do not contain certain keys.\
+                             The keys are {}'.format(self.param_keys))        
+    
     def set_det_model(self, parameters):
-        self.det_model.update_model_parameters(parameters)
+        if self.parameter_mapping is not None:          
+            self.det_model.update_model_parameters(self.parameter_mapping(parameters))
+        else:    
+            self.det_model.update_model_parameters(parameters)
 
 
     def make_params_dict(self):
@@ -3738,6 +3936,8 @@ cdef class Spp(SIR_type):
             double [:, :] l=np.zeros((num_of_infection_terms, self.M), dtype=DTYPE)
             double [:] fi=self.fi
         self.CM = self.contactMatrix(t)
+        if self.time_dep_param_mapping is not None:
+            self.set_time_dep_model_parameters(t)
         if self.constant_terms.size > 0:
             fi = x[(nClass-1)*M:]
         self.fill_lambdas(x, l)
@@ -3768,7 +3968,7 @@ cdef class Spp(SIR_type):
             Py_ssize_t rate_index, infective_index, product_index, reagent_index, S_index=self.class_index_dict['S']
             double [:, :, :, :] J = self.J
             double [:, :] CM=self.CM
-            double [:, :] parameters=self.parameters
+            double [:, :] parameters=self.model_parameters
             int [:, :] linear_terms=self.linear_terms, infection_terms=self.infection_terms
             double [:] rate
             double [:] fi=self.fi
@@ -3803,7 +4003,7 @@ cdef class Spp(SIR_type):
             Py_ssize_t rate_index, infective_index, product_index, reagent_index, S_index=self.class_index_dict['S']
             double [:, :, :, :] B=self.B
             double [:, :] CM=self.CM
-            double [:, :] parameters=self.parameters
+            double [:, :] parameters=self.model_parameters
             int [:, :] constant_terms=self.constant_terms
             int [:, :] linear_terms=self.linear_terms, infection_terms=self.infection_terms
             double [:] s, reagent, rate
@@ -4331,26 +4531,28 @@ cdef class SppQ(SIR_type):
         Fraction of each age group.
     Omega: int
         Total population.
-    steps: int
+    steps: int, optional
         The number of internal integration steps performed between the observed points (not used in tangent space inference).
-        The minimal is 4, as required by the cubic spline fit used for interpolation.
-        For robustness, set steps to be large, det_method='LSODA', lyapunov_method='LSODA'.
-        For speed, set steps to be 4, det_method='RK2', lyapunov_method='euler'.
+        For robustness, set steps to be large, lyapunov_method='LSODA'.
+        For speed, set steps to be small (~4), lyapunov_method='euler'.
         For a combination of the two, choose something in between.
     det_method: str, optional
         The integration method used for deterministic integration.
-        Choose one of 'LSODA', 'RK45', 'RK2' and 'euler'. Default is 'LSODA'.
+        Choose one of 'LSODA' and 'RK45'. Default is 'LSODA'.
     lyapunov_method: str, optional
         The integration method used for the integration of the Lyapunov equation for the covariance.
         Choose one of 'LSODA', 'RK45', 'RK2' and 'euler'. Default is 'LSODA'.
-
+    parameter_mapping: python function, optional
+        A user-defined function that maps the dictionary the parameters used for inference to a dictionary of parameters used in model_spec. Default is an identical mapping.
+    time_dep_param_mapping: python function, optional
+        As parameter_mapping, but time-dependent. The user-defined function takes time as a second argument.
 
     See `SIR_type` for a table of all the methods
 
     Examples
     --------
-    An example of model_spec and parameters for SIR class with a constant influx,
-    random testing (without false positives/negatives), and quarantine
+    An example of model_spec and parameters for SIR class with random
+    testing (without false positives/negatives) and quarantine
 
     >>> model_spec = {
             "classes" : ["S", "I"],
@@ -4377,14 +4579,32 @@ cdef class SppQ(SIR_type):
         readonly np.ndarray constant_terms, linear_terms, infection_terms, test_pos, test_freq
         readonly np.ndarray parameters
         readonly Py_ssize_t nClassU, nClassUwoN
+        readonly np.ndarray model_parameters
         readonly pyross.deterministic.SppQ det_model
+        readonly dict model_spec
+        readonly dict param_dict
+        readonly list model_param_keys
+        readonly object parameter_mapping
+        readonly object time_dep_param_mapping
         readonly object testRate
 
 
     def __init__(self, model_spec, parameters, testRate, M, fi, Omega=1, steps=4,
-                                    det_method='LSODA', lyapunov_method='LSODA'):
+                                    det_method='LSODA', lyapunov_method='LSODA', parameter_mapping=None, time_dep_param_mapping=None):
+        if parameter_mapping is not None and time_dep_param_mapping is not None:
+            raise Exception('Specify either parameter_mapping or time_dep_param_mapping')
+        self.parameter_mapping = parameter_mapping
+        self.time_dep_param_mapping = time_dep_param_mapping
         self.param_keys = list(parameters.keys())
-        res = pyross.utils.parse_model_spec(model_spec, self.param_keys)
+        if parameter_mapping is not None:
+            self.model_param_keys = list(parameter_mapping(parameters).keys())
+        elif time_dep_param_mapping is not None:
+            self.param_dict = parameters.copy()
+            self.model_param_keys = list(time_dep_param_mapping(parameters, 0).keys())
+        else:
+            self.model_param_keys = self.param_keys.copy()
+        self.model_spec=model_spec
+        res = pyross.utils.parse_model_spec(model_spec, self.model_param_keys)
         self.nClass = res[0]
         self.class_index_dict = res[1]
         self.constant_terms = res[2]
@@ -4393,7 +4613,12 @@ cdef class SppQ(SIR_type):
         self.test_pos = res[5]
         self.test_freq = res[6]
         super().__init__(parameters, self.nClass, M, fi, Omega, steps, det_method, lyapunov_method)
-        self.det_model = pyross.deterministic.SppQ(model_spec, parameters, M, fi*Omega)
+        if self.parameter_mapping is not None:
+            parameters = self.parameter_mapping(parameters)
+        if self.time_dep_param_mapping is not None:
+            self.det_model = pyross.deterministic.SppQ(model_spec, parameters, M, fi*Omega, time_dep_param_mapping=time_dep_param_mapping)
+        else:
+            self.det_model = pyross.deterministic.SppQ(model_spec, parameters, M, fi*Omega)
         self.testRate =  testRate
         self.det_model.set_testRate(testRate)
 
@@ -4403,6 +4628,7 @@ cdef class SppQ(SIR_type):
         else:
             self.nClassU = (self.nClass - 1) // 2 # number of unquarantined classes w/o constant terms
             self.nClassUwoN = self.nClassU
+        
 
     def infection_indices(self):
         cdef Py_ssize_t a = 100
@@ -4436,14 +4662,44 @@ cdef class SppQ(SIR_type):
                 param = parameters[key]
                 self.parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
         except KeyError:
-            raise Exception('The parameters passed does not contain certain keys. The keys are {}'.format(self.param_keys))
+            raise Exception('The parameters passed do not contain certain keys. The keys are {}'.format(self.param_keys))
+        if self.parameter_mapping is not None:
+            model_parameters = self.parameter_mapping(parameters)
+            nParams = len(self.model_param_keys)
+            self.model_parameters = np.empty((nParams, self.M), dtype=DTYPE)
+            try:
+                for (i, key) in enumerate(self.model_param_keys):
+                    param = model_parameters[key]
+                    self.model_parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
+            except KeyError:
+                raise Exception('The parameters returned by parameter_mapping(...) do not contain certain keys. The keys are {}'.format(self.model_param_keys))
+        elif self.time_dep_param_mapping is not None:
+            self.param_dict = parameters.copy()
+            self.set_time_dep_model_parameters(0)
+        else:
+            self.model_parameters = self.parameters.copy()
+
+    def set_time_dep_model_parameters(self, tt):
+        model_parameters = self.time_dep_param_mapping(self.param_dict, tt)
+        nParams = len(self.model_param_keys)
+        self.model_parameters = np.empty((nParams, self.M), dtype=DTYPE)
+        try:
+            for (i, key) in enumerate(self.model_param_keys):
+                param = model_parameters[key]
+                self.model_parameters[i] = pyross.utils.age_dep_rates(param, self.M, key)
+        except KeyError:
+            raise Exception('The parameters passed do not contain certain keys.\
+                             The keys are {}'.format(self.param_keys))  
 
     def set_testRate(self, testRate):
         self.testRate=testRate
         self.det_model.set_testRate(testRate)
 
     def set_det_model(self, parameters):
-        self.det_model.update_model_parameters(parameters)
+        if self.parameter_mapping is not None:          
+            self.det_model.update_model_parameters(self.parameter_mapping(parameters))
+        else:    
+            self.det_model.update_model_parameters(parameters)
         self.det_model.set_testRate(self.testRate)
 
     def make_params_dict(self):
@@ -4504,6 +4760,8 @@ cdef class SppQ(SIR_type):
             double ntestpop, tau0
             double [:] r=np.zeros(self.M, dtype=DTYPE)
         self.CM = self.contactMatrix(t)
+        if self.time_dep_param_mapping is not None:
+            self.set_time_dep_model_parameters(t)
         TR = self.testRate(t)
         if self.constant_terms.size > 0:
             fi = x[(nClassU-1)*M:]

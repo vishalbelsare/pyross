@@ -6,9 +6,10 @@ xlrd
 nlopt
 pathos
 cma
+dill
 matplotlib
 ipython
 jupyter
 nbconvert
 pandas
-nestle
+dynesty

@@ -9,7 +9,6 @@ cdef double PI = 3.1415926535
 from scipy.sparse import spdiags
 from scipy.sparse.linalg.eigen.arpack import eigs, ArpackNoConvergence
 from scipy.misc import derivative
-import matplotlib.pyplot as plt
 
 
 
@@ -577,26 +576,31 @@ def plotSIR(data, showPlot=True):
     sumS = S.sum(axis=1)
     sumI = Is.sum(axis=1)
     sumR = R.sum(axis=1)
+    
+    try:
+        import matplotlib.pyplot as plt	
+        plt.fill_between(t, 0, sumS/N, color="#348ABD", alpha=0.3)
+        plt.plot(t, sumS/N, '-', color="#348ABD", label='$S$', lw=4)
 
-    plt.fill_between(t, 0, sumS/N, color="#348ABD", alpha=0.3)
-    plt.plot(t, sumS/N, '-', color="#348ABD", label='$S$', lw=4)
+        plt.fill_between(t, 0, sumI/N, color='#A60628', alpha=0.3)
+        plt.plot(t, sumI/N, '-', color='#A60628', label='$I$', lw=4)
 
-    plt.fill_between(t, 0, sumI/N, color='#A60628', alpha=0.3)
-    plt.plot(t, sumI/N, '-', color='#A60628', label='$I$', lw=4)
+        plt.fill_between(t, 0, sumR/N, color="dimgrey", alpha=0.3)
+        plt.plot(t, sumR/N, '-', color="dimgrey", label='$R$', lw=4)
 
-    plt.fill_between(t, 0, sumR/N, color="dimgrey", alpha=0.3)
-    plt.plot(t, sumR/N, '-', color="dimgrey", label='$R$', lw=4)
+        plt.legend(fontsize=26); plt.grid()
+        plt.autoscale(enable=True, axis='x', tight=True)
 
-    plt.legend(fontsize=26); plt.grid()
-    plt.autoscale(enable=True, axis='x', tight=True)
+        plt.ylabel('Fraction of compartment value')
+        plt.xlabel('Days')
+        if True != showPlot:
+            pass
+        else:
+            plt.show()
+    
+    except ImportError:
+        print('Please install matplotlib to use this method')
 
-    plt.ylabel('Fraction of compartment value')
-    plt.xlabel('Days')
-
-    if True != showPlot:
-        pass
-    else:
-        plt.show()
 
 
 
@@ -622,6 +626,7 @@ def getPopulation(country='India', M=16):
     u6 = u0 + 'age_structures/UK.csv'
     u7 = u0 + 'age_structures/US.csv'
     u8 = u0 + 'age_structures/China-2019.csv'
+    u9 = u0 + 'age_structures/France.txt'
 
     import pandas as pd
     if country=='India':
@@ -679,6 +684,8 @@ def getPopulation(country='India', M=16):
         N_f  = np.array((data[2]))[0:M]
         Ni   = N_m + N_f
         Ni   = Ni[0:M];  Ni=Ni.astype('double')
+    elif country=='France':
+        Ni = np.genfromtxt(u9)[:, 3]
 
     else:
         print('Direct extraction of Ni is not implemnted , please do it locally')
@@ -763,13 +770,17 @@ class GPR:
 
 
     def plotResults(self):
-        plt.plot(self.xT, self.yT, 'o', ms=10, mfc='#348ABD', mec='none', label='training set' )
-        plt.plot(self.xS, self.yS, '#dddddd', lw=1.5, label='posterior')
-        plt.plot(self.xS, self.mu, '#A60628', lw=2, label='mean')
+        try:
+            import matplotlib.pyplot as plt	
+            plt.plot(self.xT, self.yT, 'o', ms=10, mfc='#348ABD', mec='none', label='training set' )
+            plt.plot(self.xS, self.yS, '#dddddd', lw=1.5, label='posterior')
+            plt.plot(self.xS, self.mu, '#A60628', lw=2, label='mean')
 
-        # fill 95% confidence interval (2*sd about the mean)
-        plt.fill_between(self.xS.flat, self.mu-2*self.sd, self.mu+2*self.sd, color="#348ABD", alpha=0.4, label='2 sigma')
-        plt.axis('tight'); plt.legend(fontsize=15); plt.rcParams.update({'font.size':18})
+            # fill 95% confidence interval (2*sd about the mean)
+            plt.fill_between(self.xS.flat, self.mu-2*self.sd, self.mu+2*self.sd, color="#348ABD", alpha=0.4, label='2 sigma')
+            plt.axis('tight'); plt.legend(fontsize=15); plt.rcParams.update({'font.size':18})
+        except ImportError:
+            print('Please install matplotlib to use this method')
 
 
     def runGPR(self):
