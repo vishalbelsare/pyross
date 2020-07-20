@@ -758,344 +758,6 @@ cdef class SIR_type:
         hess = pyross.utils.hessian_finite_difference(flat_maps, minuslogp, eps, method=fd_method)
         return hess
 
-    def robustness(self, FIM, FIM_det, map_dict, param_pos_1, param_pos_2,
-                   range_1, range_2, resolution_1, resolution_2=None):
-        '''
-        Robustness analysis in a two-dimensional slice of the parameter space, revealing neutral spaces as in https://doi.org/10.1073/pnas.1015814108.
-
-        Parameters
-        ----------
-        FIM: 2d numpy.array
-            Fisher Information matrix of a stochastic model
-        FIM_det: 2d numpy.array
-            Fisher information matrix of the corresponding deterministic model
-        map_dict: dict
-            Dictionary returned by infer_parameters
-        param_pos_1: int
-            Position of 'parameter 1' in map_dict['flat_map'] for x-axis
-        param_pos_2: int
-            Position of 'parameter 2' in map_dict['flat_map'] for y-axis
-        range_1: float
-            Symmetric interval around parameter 1 for which robustness will be analysed. Absolute interval: 'parameter 1' +/- range_1
-        range_2: float
-            Symmetric interval around parameter 2 for which robustness will be analysed. Absolute interval: 'parameter 2' +/- range_2
-        resolution_1: int
-            Resolution of the meshgrid in x direction.
-        resolution_2: int
-            Resolution of the meshgrid in y direction. Default is resolution_2=resolution_1.
-        Returns
-        -------
-        ff: 2d numpy.array
-            shape=resolution_1 x resolution_2, meshgrid for x-axis
-        ss: 2d numpy.array
-            shape=resolution_1 x resolution_2, meshgrid for y-axis
-        Z_sto: 2d numpy.array
-            shape=resolution_1 x resolution_2, expected quadratic coefficient in the Taylor expansion of the likelihood of the stochastic model
-        Z_det: 2d numpy.array
-            shape=resolution_1 x resolution_2, expected quadratic coefficient in the Taylor expansion of the likelihood of the deterministic model
-
-        Examples
-        -------
-        >>> from matplotlib import pyplot as plt
-        >>> from matplotlib import cm
-        >>>
-        >>> # positions 0 and 1 of map_dict['flat_map'] correspond to a scale parameter for alpha, and beta, respectively.
-        >>> ff, ss, Z_sto, Z_det = estimator.robustness(FIM, FIM_det, map_dict, 0, 1, 0.5, 0.01, 20)
-        >>> cmap = plt.cm.PuBu_r
-        >>> levels=11
-        >>> colors='black'
-        >>>
-        >>> c = plt.contourf(ff, ss, Z_sto, cmap=cmap, levels=levels) # heat map for the stochastic coefficient
-        >>> plt.contour(ff, ss, Z_sto, colors='black', levels=levels, linewidths=0.25)
-        >>> plt.contour(ff, ss, Z_det, colors=colors, levels=levels) # contour plot for the deterministic model
-        >>> plt.plot(map_dict['flat_map'][0], map_dict['flat_map'][1], 'o',
-                    color="#A60628", markersize=6) # the MAP estimate
-        >>> plt.colorbar(c)
-        >>> plt.xlabel(r'$\alpha$ scale', fontsize=20, labelpad=10)
-        >>> plt.ylabel(r'$\beta$', fontsize=20, labelpad=10)
-        >>> plt.show()
-        '''
-        flat_maps = map_dict['flat_map']
-        if resolution_2 == None:
-            resolution_2 = resolution_1
-        def bilinear(param_1, param_2, det=True):
-            maps_temp = np.copy(flat_maps)
-            maps_temp[param_pos_1] += param_1
-            maps_temp[param_pos_2] += param_2
-            dev = maps_temp - flat_maps
-            if det:
-                return -dev@FIM_det@dev
-            else:
-                return -dev@FIM@dev
-        param_1_range = np.linspace(-range_1, range_1, resolution_1)
-        param_2_range = np.linspace(-range_2, range_2, resolution_2)
-        ff, ss = np.meshgrid(flat_maps[param_pos_1] + param_1_range,
-                            flat_maps[param_pos_2] + param_2_range)
-        Z_sto = np.zeros((len(param_1_range), len(param_2_range)))
-        Z_det = np.zeros((len(param_1_range), len(param_2_range)))
-        i_k = 0
-        for i in param_1_range:
-            j_k = 0
-            for j in param_2_range:
-                Z_det[i_k,j_k] = bilinear(i,j,det=True)
-                Z_sto[i_k,j_k] = bilinear(i,j,det=False)
-                j_k += 1
-            i_k += 1
-        return ff, ss, Z_sto, Z_det
-
-    def sensitivity(self, FIM, rtol=1e-9, atol=1e-5):
-        '''
-        Computes the normalized sensitivity measure as defined in https://doi.org/10.1073/pnas.1015814108.
-
-        Parameters
-        ----------
-        FIM: 2d numpy.array
-            The Fisher Information Matrix
-        rtol: float, optional
-            The relative tolerance for the identifiability of an eigenvalue relative to the largest eigenvalue. Default is 1e-9.
-        atol: float, optional
-            The absolute tolerance for the identifiability of an eigenvalue. Default is 1e-5.
-
-        Returns
-        -------
-        T_j: numpy.array
-            Normalized sensitivity measure for parameters to be estimated. A larger entry translates into greater anticipated model sensitivity to changes in the parameter of interest.
-        '''
-        sign, eigvec = pyross.utils.largest_real_eig(FIM)
-        if not sign:
-            raise Exception("Largest eigenvalue of FIM is negative - check for appropriate step size eps in FIM computation ")
-
-        evals, evecs = eig(FIM)
-        evals = np.real(evals)
-        dim = len(evals)
-        max_eval = np.amax(evals)
-        buffer = np.zeros(dim)
-        i_k = 0
-        for i in evals:
-            if i>0 and i/max_eval <= rtol:
-                print("Relative size: Eigenvalue ", i_k, " is less than ", rtol, " times the largest eigenvalue and might not be identifiable.\n")
-            if i>0 and i <= atol:
-                print("Absolute size: Eigenvalue ", i_k, " is smaller than ", atol, " and might not be identifiable.\n")
-            if i<0 and abs(i/max_eval) > rtol:
-                raise Exception('Large negative eigenvalue ', i_k, ' - FIM is not positive definite. Check for appropriate step size eps in FIM computation or increase the relative tolerance rtol under which eigenvalues are treated as relatively small and potentially unidentifiable.')
-            elif i<0 and abs(i/max_eval) <= rtol:
-                print("Relative size + negative: Eigenvalue ", i_k, " is less than ", rtol, " times the largest eigenvalue AND NEGATIVE and might not be identifiable.")
-                print("Please ensure that the step size eps in the FIM computation is appropriate.")
-                print("CAUTION: Proceed with slightly modified FIM, shifting the small negative eigenvalue ", i_k, " into the positives. Thereby, all other eigenvalues and therefore sensitivities will be shifted slightly. This will have a larger relative effect on the above-mentioned small eigenvalues/sensitivities.\n")
-                buffer[i_k]=abs(i)
-            i_k +=1
-
-        max_neg = np.amax(buffer)
-        if max_neg > 0.:
-            FIM = FIM + np.diag(np.repeat(2*max_neg, repeats=dim))
-            evals, evecs = eig(FIM)
-            evals = np.real(evals)
-
-        L = np.diag(evals)
-        S_ij = np.sqrt(L)@evecs
-        S2_ij = S_ij**2
-        S2_j = np.sum(S2_ij, axis=0)
-        S2_norm = np.sum(S2_j)
-        T_j = np.divide(S2_j,S2_norm)
-        return T_j
-
-    def FIM(self, obs, fltr, Tf, contactMatrix, map_dict, tangent=False,
-            eps=None):
-        '''
-        Computes the Fisher Information Matrix (FIM) of the stochastic model.
-
-        Parameters
-        ----------
-        obs: 2d numpy.array
-            The observed trajectories with reduced number of variables
-            (number of data points, (age groups * observed model classes))
-        fltr: 2d numpy.array
-            A matrix of shape (no. observed variables, no. total variables),
-            such that obs_{ti} = fltr_{ij} * X_{tj}
-        Tf: float
-           Total time of the trajectory
-        contactMatrix: callable
-           A function that takes time (t) as an argument and returns the contactMatrix
-        map_dict: dict
-           Dictionary returned by infer_parameters
-        tangent: bool, optional
-            Set to True to use tangent space inference. Default is False.
-        eps: float or numpy.array, optional
-            Step size for numerical differentiation of the process mean and its
-            full covariance matrix with respect to the parameters.
-            If not specified, the array of square roots of the machine epsilon of the MAP estimates is used.
-            Decreasing the step size too small can result in round-off error.
-        Returns
-        -------
-        FIM: 2d numpy.array
-            The Fisher Information Matrix
-        '''
-        self.contactMatrix = contactMatrix
-        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
-        flat_maps = map_dict['flat_map']
-        kwargs = {}
-        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
-                    'scaled_param_guesses', 'param_length', 'init_flags',
-                    'init_fltrs']:
-            kwargs[key] = map_dict[key]
-
-        def mean(y):
-            return self._mean(y, obs=obs, fltr=fltr, Tf=Tf, obs0=obs0,
-                              **kwargs)
-
-        def covariance(y):
-            return self._cov(y, obs=obs, fltr=fltr, Tf=Tf, obs0=obs0,
-                             tangent=tangent, **kwargs)
-
-        cov = covariance(flat_maps)
-
-        if eps == None:
-            eps = np.sqrt(np.spacing(flat_maps))
-        elif np.isscalar(eps):
-            eps = np.repeat(eps, repeats=len(flat_maps))
-
-        print('eps-vector used for differentiation: ', eps)
-
-        invcov = np.linalg.inv(cov)
-
-        dim = len(flat_maps)
-        FIM = np.zeros((dim,dim))
-
-        rows,cols = np.triu_indices(dim)
-        for i,j in zip(rows,cols):
-            dmu_i = pyross.utils.partial_derivative(mean, var=i, point=flat_maps, dx=eps[i])
-            dmu_j = pyross.utils.partial_derivative(mean, var=j, point=flat_maps, dx=eps[j])
-            dcov_i = pyross.utils.partial_derivative(covariance, var=i, point=flat_maps, dx=eps[i])
-            dcov_j = pyross.utils.partial_derivative(covariance, var=j, point=flat_maps, dx=eps[j])
-            t1 = dmu_i@invcov@dmu_j
-            t2 = np.multiply(0.5,np.trace(invcov@dcov_i@invcov@dcov_j))
-            FIM[i,j] = t1 + t2
-        i_lower = np.tril_indices(dim,-1)
-        FIM[i_lower] = FIM.T[i_lower]
-        return FIM
-
-    def FIM_det(self, obs, fltr, Tf, contactMatrix, map_dict,
-                eps=None, measurement_error=1e-2):
-        '''
-        Computes the Fisher Information Matrix (FIM) of the deterministic model.
-
-        Parameters
-        ----------
-        obs: 2d numpy.array
-            The observed trajectories with reduced number of variables
-            (number of data points, (age groups * observed model classes))
-        fltr: 2d numpy.array
-            A matrix of shape (no. observed variables, no. total variables),
-            such that obs_{ti} = fltr_{ij} * X_{tj}
-        Tf: float
-           Total time of the trajectory
-        contactMatrix: callable
-           A function that takes time (t) as an argument and returns the contactMatrix
-        map_dict: dict
-           Dictionary returned by infer_parameters
-        eps: float or numpy.array, optional
-           Step size for numerical differentiation of the process mean and its full covariance matrix with respect
-            to the parameters. If not specified, the array of square roots of the machine epsilon of the MAP estimates is used. Decreasing the step size too small can result in round-off error.
-        measurement_error: float, optional
-            Standard deviation of measurements (uniform and independent Gaussian measurement error assumed). Default is 1e-2.
-        Returns
-        -------
-        FIM_det: 2d numpy.array
-            The Fisher Information Matrix
-        '''
-        self.contactMatrix = contactMatrix
-        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
-        flat_maps = map_dict['flat_map']
-        kwargs = {}
-        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
-                    'scaled_param_guesses', 'param_length', 'init_flags',
-                    'init_fltrs']:
-            kwargs[key] = map_dict[key]
-
-        def mean(y):
-            return self._mean(y, obs=obs, fltr=fltr, Tf=Tf, obs0=obs0,
-                              **kwargs)
-
-        fltr_ = fltr[1:]
-        sigma_sq = measurement_error*measurement_error
-        cov_diag = np.repeat(sigma_sq, repeats=(int(self.dim)*(fltr_.shape[0])))
-        cov = np.diag(cov_diag)
-        full_fltr = sparse.block_diag(fltr_)
-        cov_red = full_fltr@cov@np.transpose(full_fltr)
-        invcov = np.linalg.inv(cov_red)
-
-        if eps == None:
-            eps = np.sqrt(np.spacing(flat_maps))
-        elif np.isscalar(eps):
-            eps = np.repeat(eps, repeats=len(flat_maps))
-
-        print('eps-vector used for differentiation: ', eps)
-
-        dim = len(flat_maps)
-        FIM_det = np.zeros((dim,dim))
-
-        rows,cols = np.triu_indices(dim)
-        for i,j in zip(rows,cols):
-            dmu_i = pyross.utils.partial_derivative(mean, var=i, point=flat_maps, dx=eps[i])
-            dmu_j = pyross.utils.partial_derivative(mean, var=j, point=flat_maps, dx=eps[j])
-            FIM_det[i,j] = dmu_i@invcov@dmu_j
-        i_lower = np.tril_indices(dim,-1)
-        FIM_det[i_lower] = FIM_det.T[i_lower]
-        return FIM_det
-
-    def _mean(self, params, grad=0, param_keys=None,
-                            param_guess_range=None, is_scale_parameter=None,
-                            scaled_param_guesses=None, param_length=None,
-                            obs=None, fltr=None, Tf=None, obs0=None,
-                            init_flags=None, init_fltrs=None):
-        """Objective function for differentiation call in FIM and FIM_det."""
-        inits =  np.copy(params[param_length:])
-
-        # Restore parameters from flattened parameters
-        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
-                          param_guess_range, is_scale_parameter, scaled_param_guesses)
-
-        parameters = self.fill_params_dict(param_keys, orig_params)
-        self.set_params(parameters)
-        self.set_det_model(parameters)
-        fltr_ = fltr[1:]
-        Nf=fltr_.shape[0]+1
-        full_fltr = sparse.block_diag(fltr_)
-
-        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
-        xm = self.integrate(x0, 0, Tf, Nf)
-        xm_red = full_fltr@(np.ravel(xm[1:]))
-        return xm_red
-
-    def _cov(self, params, grad=0, param_keys=None,
-                            param_guess_range=None, is_scale_parameter=None,
-                            scaled_param_guesses=None, param_length=None,
-                            obs=None, fltr=None, Tf=None, obs0=None,
-                            init_flags=None, init_fltrs=None, tangent=None):
-        """Objective function for differentiation call in FIM."""
-        inits =  np.copy(params[param_length:])
-
-        # Restore parameters from flattened parameters
-        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
-                          param_guess_range, is_scale_parameter, scaled_param_guesses)
-
-        parameters = self.fill_params_dict(param_keys, orig_params)
-        self.set_params(parameters)
-        self.set_det_model(parameters)
-
-        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
-        fltr_ = fltr[1:]
-        Nf=fltr_.shape[0]+1
-        full_fltr = sparse.block_diag(fltr_)
-
-        if tangent:
-            xm, full_cov = self.obtain_full_mean_cov_tangent_space(x0, Tf, Nf)
-        else:
-            xm, full_cov = self.obtain_full_mean_cov(x0, Tf, Nf)
-
-        cov_red = full_fltr@full_cov@np.transpose(full_fltr)
-        return cov_red
-
     # def error_bars(self, keys, maps, prior_mean, prior_stds, x, Tf, Nf, contactMatrix, eps=1.e-3,
     #                tangent=False, infer_scale_parameter=False, fd_method="central"):
     #     hessian = self.compute_hessian(keys, maps, prior_mean, prior_stds, x,Tf,eps,
@@ -1170,9 +832,9 @@ cdef class SIR_type:
         x: 2d numpy.array
             Observed trajectory (number of data points x (age groups * model classes))
         Tf: float
-            Total time of the trajectory
+           Total time of the trajectory
         contactMatrix: callable
-            A function that takes time (t) as an argument and returns the contactMatrix
+           A function that takes time (t) as an argument and returns the contactMatrix
         map_dict: dict
             MAP estimate returned by infer_parameters
         eps: float or numpy.array, optional
@@ -2505,11 +2167,573 @@ cdef class SIR_type:
         hess = pyross.utils.hessian_finite_difference(flat_maps, minuslogp, eps, method=fd_method)
         return hess
 
+    def robustness(self, FIM, FIM_det, map_dict, param_pos_1, param_pos_2,
+                   range_1, range_2, resolution_1, resolution_2=None):
+        '''
+        Robustness analysis in a two-dimensional slice of the parameter space, revealing neutral spaces as in https://doi.org/10.1073/pnas.1015814108.
+
+        Parameters
+        ----------
+        FIM: 2d numpy.array
+            Fisher Information matrix of a stochastic model
+        FIM_det: 2d numpy.array
+            Fisher information matrix of the corresponding deterministic model
+        map_dict: dict
+            Dictionary returned by infer_parameters
+        param_pos_1: int
+            Position of 'parameter 1' in map_dict['flat_map'] for x-axis
+        param_pos_2: int
+            Position of 'parameter 2' in map_dict['flat_map'] for y-axis
+        range_1: float
+            Symmetric interval around parameter 1 for which robustness will be analysed. Absolute interval: 'parameter 1' +/- range_1
+        range_2: float
+            Symmetric interval around parameter 2 for which robustness will be analysed. Absolute interval: 'parameter 2' +/- range_2
+        resolution_1: int
+            Resolution of the meshgrid in x direction.
+        resolution_2: int
+            Resolution of the meshgrid in y direction. Default is resolution_2=resolution_1.
+        Returns
+        -------
+        ff: 2d numpy.array
+            shape=resolution_1 x resolution_2, meshgrid for x-axis
+        ss: 2d numpy.array
+            shape=resolution_1 x resolution_2, meshgrid for y-axis
+        Z_sto: 2d numpy.array
+            shape=resolution_1 x resolution_2, expected quadratic coefficient in the Taylor expansion of the likelihood of the stochastic model
+        Z_det: 2d numpy.array
+            shape=resolution_1 x resolution_2, expected quadratic coefficient in the Taylor expansion of the likelihood of the deterministic model
+
+        Examples
+        -------
+        >>> from matplotlib import pyplot as plt
+        >>> from matplotlib import cm
+        >>>
+        >>> # positions 0 and 1 of map_dict['flat_map'] correspond to a scale parameter for alpha, and beta, respectively.
+        >>> ff, ss, Z_sto, Z_det = estimator.robustness(FIM, FIM_det, map_dict, 0, 1, 0.5, 0.01, 20)
+        >>> cmap = plt.cm.PuBu_r
+        >>> levels=11
+        >>> colors='black'
+        >>>
+        >>> c = plt.contourf(ff, ss, Z_sto, cmap=cmap, levels=levels) # heat map for the stochastic coefficient
+        >>> plt.contour(ff, ss, Z_sto, colors='black', levels=levels, linewidths=0.25)
+        >>> plt.contour(ff, ss, Z_det, colors=colors, levels=levels) # contour plot for the deterministic model
+        >>> plt.plot(map_dict['flat_map'][0], map_dict['flat_map'][1], 'o',
+                    color="#A60628", markersize=6) # the MAP estimate
+        >>> plt.colorbar(c)
+        >>> plt.xlabel(r'$\alpha$ scale', fontsize=20, labelpad=10)
+        >>> plt.ylabel(r'$\beta$', fontsize=20, labelpad=10)
+        >>> plt.show()
+        '''
+        flat_maps = map_dict['flat_map']
+        if resolution_2 == None:
+            resolution_2 = resolution_1
+        def bilinear(param_1, param_2, det=True):
+            maps_temp = np.copy(flat_maps)
+            maps_temp[param_pos_1] += param_1
+            maps_temp[param_pos_2] += param_2
+            dev = maps_temp - flat_maps
+            if det:
+                return -dev@FIM_det@dev
+            else:
+                return -dev@FIM@dev
+        param_1_range = np.linspace(-range_1, range_1, resolution_1)
+        param_2_range = np.linspace(-range_2, range_2, resolution_2)
+        ff, ss = np.meshgrid(flat_maps[param_pos_1] + param_1_range,
+                            flat_maps[param_pos_2] + param_2_range)
+        Z_sto = np.zeros((len(param_1_range), len(param_2_range)))
+        Z_det = np.zeros((len(param_1_range), len(param_2_range)))
+        i_k = 0
+        for i in param_1_range:
+            j_k = 0
+            for j in param_2_range:
+                Z_det[i_k,j_k] = bilinear(i,j,det=True)
+                Z_sto[i_k,j_k] = bilinear(i,j,det=False)
+                j_k += 1
+            i_k += 1
+        return ff, ss, Z_sto, Z_det
+
+    def sensitivity(self, FIM, rtol=1e-9, atol=1e-5):
+        '''
+        Computes the normalized sensitivity measure as defined in https://doi.org/10.1073/pnas.1015814108.
+
+        Parameters
+        ----------
+        FIM: 2d numpy.array
+            The Fisher Information Matrix
+        rtol: float, optional
+            The relative tolerance for the identifiability of an eigenvalue relative to the largest eigenvalue. Default is 1e-9.
+        atol: float, optional
+            The absolute tolerance for the identifiability of an eigenvalue. Default is 1e-5.
+
+        Returns
+        -------
+        T_j: numpy.array
+            Normalized sensitivity measure for parameters to be estimated. A larger entry translates into greater anticipated model sensitivity to changes in the parameter of interest.
+        '''
+        sign, eigvec = pyross.utils.largest_real_eig(FIM)
+        if not sign:
+            raise Exception("Largest eigenvalue of FIM is negative - check for appropriate step size eps in FIM computation ")
+
+        evals, evecs = eig(FIM)
+        evals = np.real(evals)
+        dim = len(evals)
+        max_eval = np.amax(evals)
+        buffer = np.zeros(dim)
+        i_k = 0
+        for i in evals:
+            if i>0 and i/max_eval <= rtol:
+                print("Relative size: Eigenvalue ", i_k, " is less than ", rtol, " times the largest eigenvalue and might not be identifiable.\n")
+            if i>0 and i <= atol:
+                print("Absolute size: Eigenvalue ", i_k, " is smaller than ", atol, " and might not be identifiable.\n")
+            if i<0 and abs(i/max_eval) > rtol:
+                raise Exception('Large negative eigenvalue ', i_k, ' - FIM is not positive definite. Check for appropriate step size eps in FIM computation or increase the relative tolerance rtol under which eigenvalues are treated as relatively small and potentially unidentifiable.')
+            elif i<0 and abs(i/max_eval) <= rtol:
+                print("Relative size + negative: Eigenvalue ", i_k, " is less than ", rtol, " times the largest eigenvalue AND NEGATIVE and might not be identifiable.")
+                print("Please ensure that the step size eps in the FIM computation is appropriate.")
+                print("CAUTION: Proceed with slightly modified FIM, shifting the small negative eigenvalue ", i_k, " into the positives. Thereby, all other eigenvalues and therefore sensitivities will be shifted slightly. This will have a larger relative effect on the above-mentioned small eigenvalues/sensitivities.\n")
+                buffer[i_k]=abs(i)
+            i_k +=1
+
+        max_neg = np.amax(buffer)
+        if max_neg > 0.:
+            FIM = FIM + np.diag(np.repeat(2*max_neg, repeats=dim))
+            evals, evecs = eig(FIM)
+            evals = np.real(evals)
+
+        L = np.diag(evals)
+        S_ij = np.sqrt(L)@evecs
+        S2_ij = S_ij**2
+        S2_j = np.sum(S2_ij, axis=0)
+        S2_norm = np.sum(S2_j)
+        T_j = np.divide(S2_j,S2_norm)
+        return T_j
+
+    def FIM(self, obs, fltr, Tf, contactMatrix, map_dict, tangent=False,
+            eps=None):
+        '''
+        Computes the Fisher Information Matrix (FIM) of the stochastic model for epidemiological parameters and initial conditions.
+
+        Parameters
+        ----------
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        Tf: float
+           Total time of the trajectory
+        contactMatrix: callable
+           A function that takes time (t) as an argument and returns the contactMatrix
+        map_dict: dict
+           Dictionary returned by infer_parameters
+        tangent: bool, optional
+            Set to True to use tangent space inference. Default is False.
+        eps: float or numpy.array, optional
+            Step size for numerical differentiation of the process mean and its
+            full covariance matrix with respect to the parameters.
+            If not specified, the array of square roots of the machine epsilon of the MAP estimates is used.
+            Decreasing the step size too small can result in round-off error.
+        Returns
+        -------
+        FIM: 2d numpy.array
+            The Fisher Information Matrix
+        '''
+        self.contactMatrix = contactMatrix
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+        flat_maps = map_dict['flat_map']
+        kwargs = {}
+        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
+                    'scaled_param_guesses', 'param_length', 'init_flags',
+                    'init_fltrs']:
+            kwargs[key] = map_dict[key]
+
+        def mean(y):
+            return self._mean(y, obs=obs, fltr=fltr, Tf=Tf, obs0=obs0,
+                              **kwargs)
+
+        def covariance(y):
+            return self._cov(y, obs=obs, fltr=fltr, Tf=Tf, obs0=obs0,
+                             tangent=tangent, **kwargs)
+
+        cov = covariance(flat_maps)
+
+        if eps == None:
+            eps = np.sqrt(np.spacing(flat_maps))
+        elif np.isscalar(eps):
+            eps = np.repeat(eps, repeats=len(flat_maps))
+
+        print('eps-vector used for differentiation: ', eps)
+
+        invcov = np.linalg.inv(cov)
+
+        dim = len(flat_maps)
+        FIM = np.zeros((dim,dim))
+
+        rows,cols = np.triu_indices(dim)
+        for i,j in zip(rows,cols):
+            dmu_i = pyross.utils.partial_derivative(mean, var=i, point=flat_maps, dx=eps[i])
+            dmu_j = pyross.utils.partial_derivative(mean, var=j, point=flat_maps, dx=eps[j])
+            dcov_i = pyross.utils.partial_derivative(covariance, var=i, point=flat_maps, dx=eps[i])
+            dcov_j = pyross.utils.partial_derivative(covariance, var=j, point=flat_maps, dx=eps[j])
+            t1 = dmu_i@invcov@dmu_j
+            t2 = np.multiply(0.5,np.trace(invcov@dcov_i@invcov@dcov_j))
+            FIM[i,j] = t1 + t2
+        i_lower = np.tril_indices(dim,-1)
+        FIM[i_lower] = FIM.T[i_lower]
+        return FIM
+
+    def FIM_det(self, obs, fltr, Tf, contactMatrix, map_dict,
+                eps=None, measurement_error=1e-2):
+        '''
+        Computes the Fisher Information Matrix (FIM) of the deterministic model for epidemiological parameters and initial conditions.
+
+        Parameters
+        ----------
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        Tf: float
+           Total time of the trajectory
+        contactMatrix: callable
+           A function that takes time (t) as an argument and returns the contactMatrix
+        map_dict: dict
+           Dictionary returned by infer_parameters
+        eps: float or numpy.array, optional
+           Step size for numerical differentiation of the process mean and its full covariance matrix with respect
+            to the parameters. If not specified, the array of square roots of the machine epsilon of the MAP estimates is used. Decreasing the step size too small can result in round-off error.
+        measurement_error: float, optional
+            Standard deviation of measurements (uniform and independent Gaussian measurement error assumed). Default is 1e-2.
+        Returns
+        -------
+        FIM_det: 2d numpy.array
+            The Fisher Information Matrix
+        '''
+        self.contactMatrix = contactMatrix
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+        flat_maps = map_dict['flat_map']
+        kwargs = {}
+        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
+                    'scaled_param_guesses', 'param_length', 'init_flags',
+                    'init_fltrs']:
+            kwargs[key] = map_dict[key]
+
+        def mean(y):
+            return self._mean(y, obs=obs, fltr=fltr, Tf=Tf, obs0=obs0,
+                              **kwargs)
+
+        fltr_ = fltr[1:]
+        sigma_sq = measurement_error*measurement_error
+        cov_diag = np.repeat(sigma_sq, repeats=(int(self.dim)*(fltr_.shape[0])))
+        cov = np.diag(cov_diag)
+        full_fltr = sparse.block_diag(fltr_)
+        cov_red = full_fltr@cov@np.transpose(full_fltr)
+        invcov = np.linalg.inv(cov_red)
+
+        if eps == None:
+            eps = np.sqrt(np.spacing(flat_maps))
+        elif np.isscalar(eps):
+            eps = np.repeat(eps, repeats=len(flat_maps))
+
+        print('eps-vector used for differentiation: ', eps)
+
+        dim = len(flat_maps)
+        FIM_det = np.zeros((dim,dim))
+
+        rows,cols = np.triu_indices(dim)
+        for i,j in zip(rows,cols):
+            dmu_i = pyross.utils.partial_derivative(mean, var=i, point=flat_maps, dx=eps[i])
+            dmu_j = pyross.utils.partial_derivative(mean, var=j, point=flat_maps, dx=eps[j])
+            FIM_det[i,j] = dmu_i@invcov@dmu_j
+        i_lower = np.tril_indices(dim,-1)
+        FIM_det[i_lower] = FIM_det.T[i_lower]
+        return FIM_det
+
+    def _mean(self, params, grad=0, param_keys=None,
+                            param_guess_range=None, is_scale_parameter=None,
+                            scaled_param_guesses=None, param_length=None,
+                            obs=None, fltr=None, Tf=None, obs0=None,
+                            init_flags=None, init_fltrs=None):
+        """Objective function for differentiation call in FIM and FIM_det."""
+        inits =  np.copy(params[param_length:])
+
+        # Restore parameters from flattened parameters
+        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
+                          param_guess_range, is_scale_parameter, scaled_param_guesses)
+
+        parameters = self.fill_params_dict(param_keys, orig_params)
+        self.set_params(parameters)
+        self.set_det_model(parameters)
+        fltr_ = fltr[1:]
+        Nf=fltr_.shape[0]+1
+        full_fltr = sparse.block_diag(fltr_)
+
+        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
+        xm = self.integrate(x0, 0, Tf, Nf)
+        xm_red = full_fltr@(np.ravel(xm[1:]))
+        return xm_red
+
+    def _cov(self, params, grad=0, param_keys=None,
+                            param_guess_range=None, is_scale_parameter=None,
+                            scaled_param_guesses=None, param_length=None,
+                            obs=None, fltr=None, Tf=None, obs0=None,
+                            init_flags=None, init_fltrs=None, tangent=None):
+        """Objective function for differentiation call in FIM."""
+        inits =  np.copy(params[param_length:])
+
+        # Restore parameters from flattened parameters
+        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
+                          param_guess_range, is_scale_parameter, scaled_param_guesses)
+
+        parameters = self.fill_params_dict(param_keys, orig_params)
+        self.set_params(parameters)
+        self.set_det_model(parameters)
+
+        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
+        fltr_ = fltr[1:]
+        Nf=fltr_.shape[0]+1
+        full_fltr = sparse.block_diag(fltr_)
+
+        if tangent:
+            xm, full_cov = self.obtain_full_mean_cov_tangent_space(x0, Tf, Nf)
+        else:
+            xm, full_cov = self.obtain_full_mean_cov(x0, Tf, Nf)
+
+        cov_red = full_fltr@full_cov@np.transpose(full_fltr)
+        return cov_red
+
     # def error_bars_latent(self, param_keys, init_fltr, maps, prior_mean, prior_stds, obs, fltr, Tf, Nf, contactMatrix,
     #                       tangent=False, infer_scale_parameter=False, eps=1.e-3, obs0=None, fltr0=None, fd_method="central"):
     #     hessian = self.compute_hessian_latent(param_keys, init_fltr, maps, prior_mean, prior_stds, obs, fltr, Tf, Nf,
     #                                           contactMatrix, tangent, infer_scale_parameter, eps, obs0, fltr0, fd_method=fd_method)
     #     return np.sqrt(np.diagonal(np.linalg.inv(hessian)))
+
+    def FIM_control(self, obs, fltr, Tf, generator, map_dict, intervention_fun=None, tangent=False, eps=None):
+        '''
+        Computes the Fisher Information Matrix (FIM) of the stochastic model for control parameters and initial conditions.
+
+        Parameters
+        ----------
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        Tf: float
+           Total time of the trajectory
+        generator: pyross.contactMatrix
+            A pyross.contactMatrix object that generates a contact matrix function with specified lockdown
+            parameters.
+        map_dict: dict
+           Dictionary returned by infer_parameters
+        intervention_fun: callable, optional
+            The calling signature is `intervention_func(t, **kwargs)`,
+            where t is time and kwargs are other keyword arguments for the function.
+            The function must return (aW, aS, aO), where aW, aS and aO are (2, M) arrays.
+            The contact matrices are then rescaled as :math:`aW[0]_i CW_{ij} aW[1]_j` etc.
+            If not set, assume intervention that's constant in time.
+            See `contactMatrix.constant_contactMatrix` for details on the keyword parameters.
+        tangent: bool, optional
+            Set to True to use tangent space inference. Default is False.
+        eps: float or numpy.array, optional
+            Step size for numerical differentiation of the process mean and its
+            full covariance matrix with respect to the parameters.
+            If not specified, the array of square roots of the machine epsilon of the MAP estimates is used.
+            Decreasing the step size too small can result in round-off error.
+        Returns
+        -------
+        FIM: 2d numpy.array
+            The Fisher Information Matrix
+        '''
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+        flat_maps = map_dict['flat_map']
+        kwargs = {}
+        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
+                    'scaled_param_guesses', 'param_length', 'init_flags',
+                    'init_fltrs']:
+            kwargs[key] = map_dict[key]
+
+        def mean(y):
+            return self._mean_control(y, generator=generator,
+                              intervention_fun=intervention_fun, obs=obs,
+                              fltr=fltr, Tf=Tf, obs0=obs0,
+                              **kwargs)
+
+        def covariance(y):
+            return self._cov_control(y, generator=generator,
+                              intervention_fun=intervention_fun, obs=obs,
+                              fltr=fltr, Tf=Tf, obs0=obs0,
+                              **kwargs)
+
+        cov = covariance(flat_maps)
+
+        if eps == None:
+            eps = np.sqrt(np.spacing(flat_maps))
+        elif np.isscalar(eps):
+            eps = np.repeat(eps, repeats=len(flat_maps))
+
+        print('eps-vector used for differentiation: ', eps)
+
+        invcov = np.linalg.inv(cov)
+
+        dim = len(flat_maps)
+        FIM = np.zeros((dim,dim))
+
+        rows,cols = np.triu_indices(dim)
+        for i,j in zip(rows,cols):
+            dmu_i = pyross.utils.partial_derivative(mean, var=i, point=flat_maps, dx=eps[i])
+            dmu_j = pyross.utils.partial_derivative(mean, var=j, point=flat_maps, dx=eps[j])
+            dcov_i = pyross.utils.partial_derivative(covariance, var=i, point=flat_maps, dx=eps[i])
+            dcov_j = pyross.utils.partial_derivative(covariance, var=j, point=flat_maps, dx=eps[j])
+            t1 = dmu_i@invcov@dmu_j
+            t2 = np.multiply(0.5,np.trace(invcov@dcov_i@invcov@dcov_j))
+            FIM[i,j] = t1 + t2
+        i_lower = np.tril_indices(dim,-1)
+        FIM[i_lower] = FIM.T[i_lower]
+        return FIM
+    
+    def FIM_det_control(self, obs, fltr, Tf, generator, map_dict,
+                        intervention_fun=None,
+                eps=None, measurement_error=1e-2):
+        '''
+        Computes the Fisher Information Matrix (FIM) of the deterministic model for control parameters and initial conditions.
+
+        Parameters
+        ----------
+        obs: 2d numpy.array
+            The observed trajectories with reduced number of variables
+            (number of data points, (age groups * observed model classes))
+        fltr: 2d numpy.array
+            A matrix of shape (no. observed variables, no. total variables),
+            such that obs_{ti} = fltr_{ij} * X_{tj}
+        Tf: float
+           Total time of the trajectory
+        generator: pyross.contactMatrix
+            A pyross.contactMatrix object that generates a contact matrix function with specified lockdown
+            parameters.
+        map_dict: dict
+           Dictionary returned by infer_parameters
+        intervention_fun: callable, optional
+            The calling signature is `intervention_func(t, **kwargs)`,
+            where t is time and kwargs are other keyword arguments for the function.
+            The function must return (aW, aS, aO), where aW, aS and aO are (2, M) arrays.
+            The contact matrices are then rescaled as :math:`aW[0]_i CW_{ij} aW[1]_j` etc.
+            If not set, assume intervention that's constant in time.
+            See `contactMatrix.constant_contactMatrix` for details on the keyword parameters.
+        eps: float or numpy.array, optional
+           Step size for numerical differentiation of the process mean and its full covariance matrix with respect
+            to the parameters. If not specified, the array of square roots of the machine epsilon of the MAP estimates is used. Decreasing the step size too small can result in round-off error.
+        measurement_error: float, optional
+            Standard deviation of measurements (uniform and independent Gaussian measurement error assumed). Default is 1e-2.
+        Returns
+        -------
+        FIM_det: 2d numpy.array
+            The Fisher Information Matrix
+        '''
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+        flat_maps = map_dict['flat_map']
+        kwargs = {}
+        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
+                    'scaled_param_guesses', 'param_length', 'init_flags',
+                    'init_fltrs']:
+            kwargs[key] = map_dict[key]
+
+        def mean(y):
+            return self._mean_control(y, generator=generator,
+                              intervention_fun=intervention_fun, obs=obs,
+                              fltr=fltr, Tf=Tf, obs0=obs0,
+                              **kwargs)
+
+        fltr_ = fltr[1:]
+        sigma_sq = measurement_error*measurement_error
+        cov_diag = np.repeat(sigma_sq, repeats=(int(self.dim)*(fltr_.shape[0])))
+        cov = np.diag(cov_diag)
+        full_fltr = sparse.block_diag(fltr_)
+        cov_red = full_fltr@cov@np.transpose(full_fltr)
+        invcov = np.linalg.inv(cov_red)
+
+        if eps == None:
+            eps = np.sqrt(np.spacing(flat_maps))
+        elif np.isscalar(eps):
+            eps = np.repeat(eps, repeats=len(flat_maps))
+
+        print('eps-vector used for differentiation: ', eps)
+
+        dim = len(flat_maps)
+        FIM_det = np.zeros((dim,dim))
+
+        rows,cols = np.triu_indices(dim)
+        for i,j in zip(rows,cols):
+            dmu_i = pyross.utils.partial_derivative(mean, var=i, point=flat_maps, dx=eps[i])
+            dmu_j = pyross.utils.partial_derivative(mean, var=j, point=flat_maps, dx=eps[j])
+            FIM_det[i,j] = dmu_i@invcov@dmu_j
+        i_lower = np.tril_indices(dim,-1)
+        FIM_det[i_lower] = FIM_det.T[i_lower]
+        return FIM_det
+
+    def _mean_control(self, params, generator=None, intervention_fun=None,
+              param_keys=None,
+                            param_guess_range=None, is_scale_parameter=None,
+                            scaled_param_guesses=None, param_length=None,
+                            obs=None, fltr=None, Tf=None, obs0=None,
+                            init_flags=None, init_fltrs=None):
+        """Objective function for differentiation call in FIM_control and FIM_det_control."""
+        inits =  np.copy(params[param_length:])
+
+        # Restore parameters from flattened parameters
+        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
+                          param_guess_range, is_scale_parameter, scaled_param_guesses)
+        
+        kwargs = {k:orig_params[i] for (i, k) in enumerate(param_keys)}
+        if intervention_fun is None:
+            self.contactMatrix = generator.constant_contactMatrix(**kwargs)
+        else:
+            self.contactMatrix = generator.intervention_custom_temporal(intervention_fun, **kwargs)
+
+        fltr_ = fltr[1:]
+        Nf=fltr_.shape[0]+1
+        full_fltr = sparse.block_diag(fltr_)
+
+        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
+        xm = self.integrate(x0, 0, Tf, Nf)
+        xm_red = full_fltr@(np.ravel(xm[1:]))
+        return xm_red
+
+    def _cov_control(self, params, generator=None, intervention_fun=None,
+             param_keys=None,
+                            param_guess_range=None, is_scale_parameter=None,
+                            scaled_param_guesses=None, param_length=None,
+                            obs=None, fltr=None, Tf=None, obs0=None,
+                            init_flags=None, init_fltrs=None, tangent=None):
+        """Objective function for differentiation call in FIM_control."""
+        inits =  np.copy(params[param_length:])
+
+        # Restore parameters from flattened parameters
+        orig_params = pyross.utils.unflatten_parameters(params[:param_length],
+                          param_guess_range, is_scale_parameter, scaled_param_guesses)
+        
+        kwargs = {k:orig_params[i] for (i, k) in enumerate(param_keys)}
+        if intervention_fun is None:
+            self.contactMatrix = generator.constant_contactMatrix(**kwargs)
+        else:
+            self.contactMatrix = generator.intervention_custom_temporal(intervention_fun, **kwargs)
+
+        x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
+        fltr_ = fltr[1:]
+        Nf=fltr_.shape[0]+1
+        full_fltr = sparse.block_diag(fltr_)
+
+        if tangent:
+            xm, full_cov = self.obtain_full_mean_cov_tangent_space(x0, Tf, Nf)
+        else:
+            xm, full_cov = self.obtain_full_mean_cov(x0, Tf, Nf)
+
+        cov_red = full_fltr@full_cov@np.transpose(full_fltr)
+        return cov_red
 
 
     def sample_gaussian_latent(self, N, map_estimate, cov, obs, fltr, Tf, contactMatrix, param_priors, init_priors,
