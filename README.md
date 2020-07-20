@@ -4,7 +4,7 @@
 ## PyRoss: inference, forecasts, and optimised control for epidemiological models in Python [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/rajeshrinet/pyross/master?filepath=binder) ![CI](https://github.com/rajeshrinet/pyross/workflows/CI/badge.svg) ![Notebooks](https://github.com/rajeshrinet/pyross/workflows/Notebooks/badge.svg)  [![PyPI](https://img.shields.io/pypi/v/pyross.svg)](https://pypi.python.org/pypi/pyross) [![Python Version](https://img.shields.io/pypi/pyversions/pyross)](https://pypi.org/project/pyross) [![Downloads](https://pepy.tech/badge/pyross)](https://pepy.tech/project/pyross)  ![stars](https://img.shields.io/github/stars/rajeshrinet/pyross) ![forks](https://img.shields.io/github/forks/rajeshrinet/pyross) ![License](https://img.shields.io/github/license/rajeshrinet/pyross) 
 
 
-[About](#about) | [Installation](#installation) | [Examples](#examples) | [Publications ](#publications) | [News](#news) |  [License](#license) | [Documentation](https://pyross.readthedocs.io/en/latest/) | [Events](https://github.com/rajeshrinet/pyross/wiki/Upcoming-and-past-events) | [Wiki](https://github.com/rajeshrinet/pyross/wiki)
+[About](#about) | [Blog](https://pyrosslib.github.io/blog/) | [Installation](#installation) | [Examples](#examples) | [Publications ](#publications) | [News](#news) |  [License](#license) | [Documentation](https://pyross.readthedocs.io/en/latest/) | [Events](https://github.com/rajeshrinet/pyross/wiki/Upcoming-and-past-events) | [Wiki](https://github.com/rajeshrinet/pyross/wiki)
 
 
 
@@ -47,8 +47,18 @@ Please read the  [PyRoss paper](https://arxiv.org/abs/2005.09625) and [PyRoss Wi
 ## Installation
 You can take PyRoss for a spin **without installation**: [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/rajeshrinet/pyross/master?filepath=binder). Please be patient while [Binder](https://mybinder.org/v2/gh/rajeshrinet/pyross/master?filepath=binder) loads.
 
+#### From a checkout of this repository
 
-### Via [Anaconda](https://docs.conda.io/projects/continuumio-conda/en/latest/user-guide/install/index.html)
+Install PyRoss and required dependencies using
+
+```bash
+>> git clone https://github.com/rajeshrinet/pyross.git
+>> cd pyross
+>> pip install -r requirements.txt
+>> python setup.py install
+```
+
+#### Via [Anaconda](https://docs.conda.io/projects/continuumio-conda/en/latest/user-guide/install/index.html)
 
 Install PyRoss and its dependencies in a `pyross` [environment](https://github.com/rajeshrinet/pyross/blob/master/environment.yml):
 
@@ -60,7 +70,7 @@ Install PyRoss and its dependencies in a `pyross` [environment](https://github.c
 >> make
 ```
 
-### Via pip
+#### Via pip
 
 Install the latest [PyPI](https://pypi.org/project/pyross) version
 
@@ -68,28 +78,21 @@ Install the latest [PyPI](https://pypi.org/project/pyross) version
 >> pip install pyross
 ```
 
-### From a checkout of this repository
 
-Install PyRoss and required dependencies using
-
-```bash
->> git clone https://github.com/rajeshrinet/pyross.git
->> cd pyross
->> pip install -r requirements.txt
->> python setup.py install
-```
 
 
 #### Testing
 Short test of initialisation and running
-```
-make test
+
+```bash
+>> make test
 ```
 
 Long test of all example notebooks. Optionally can specify path and recursion
-to test a certain subset of notebooks.
-```
-make nbtest -e path=examples/deterministic/
+to test a certain subset of notebooks
+
+```bash
+>> make nbtest -e path=examples/deterministic/
 ```
 
 **Age structure data:** [Population Pyramid](https://www.populationpyramid.net/) website
