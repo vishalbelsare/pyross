@@ -338,9 +338,7 @@ def largest_real_eig(np.ndarray A):
     eigval_sign = (eigval > 0)
     return eigval_sign, eigvec
 
-
-
-def hessian_finite_difference(pos, function, eps=1e-3, method="central"):
+def gradient_fd(pos, function, shape, a_step=None, r_step=1e-3, method='central'):
     """Forward finite-difference computation of the Hessian of a function.
 
     Parameters
@@ -359,29 +357,74 @@ def hessian_finite_difference(pos, function, eps=1e-3, method="central"):
     hess: numpy.array(dims=2)
         Hessian of function at pos.
     """
-    k = len(pos)
-    if not hasattr(eps, "__len__"):
-        eps = eps*np.ones(k)
+    if a_step is None:
+        a_step = r_step*pos
+    elif np.size(a_step) == 1:
+        a_step = np.full(len(pos), a_step)
 
+    assert shape[0] == len(pos)
+    grad = np.empty(shape, dtype=DTYPE)
+
+    if method == "forward":
+        val = function(pos)
+        for i in range(shape[0]):
+            pos[i] += a_step[i]
+            grad[i] = (function(pos)-val)/a_step[i]
+            pos[i] -= a_step[i]
+    if method == "central":
+        for i in range(shape[0]):
+            pos[i] += a_step[i]
+            val = function(pos)
+            pos[i] -= 2*a_step[i]
+            grad[i] = (val - function(pos))/(2*a_step[i])
+            pos[i] += a_step[i]
+    return grad
+
+
+def hessian_finite_difference(pos, function, a_step=None, r_step=1e-3, method="central"):
+    """Forward finite-difference computation of the Hessian of a function.
+
+    Parameters
+    ----------
+    pos:numpy.array(dims=1)
+        Position at which the hessian is to be computed.
+    function: function(numpy.array)
+        Function of interest.
+    pos: float or numpy.array(dims=1), optional
+        Step size used for FD computation (can be parameter dependant).
+    method: str
+        Different options for the FD computation: "forward" or "central".
+
+    Returns
+    -------
+    hess: numpy.array(dims=2)
+        Hessian of function at pos.
+    """
+    if a_step is None:
+        a_step = r_step*pos
+    elif np.size(a_step) == 1:
+        a_step = np.full(len(pos), a_step)
+
+    k = len(pos)
     hessian = np.empty((k, k))
 
     if method == "forward":
         val_central = function(pos)
         val1 = np.zeros(k)
         for i in range(k):
-            pos[i] += eps[i]
+            pos[i] += a_step[i]
             val1[i] = function(pos)
-            pos[i] -= eps[i]
+            pos[i] -= a_step[i]
 
         for i in range(k):
-            pos[i] += eps[i]
+            pos[i] += a_step[i]
             for j in range(k):
-                pos[j] += eps[j]
+                pos[j] += a_step[j]
                 val2 = function(pos)
-                pos[j] -= eps[j]
+                pos[j] -= a_step[j]
 
-                hessian[i, j] = (val2 - val1[i] - val1[j] + val_central)/(eps[i]*eps[j])
-            pos[i] -= eps[i]
+                hessian[i, j] = (val2 - val1[i] - val1[j] + val_central)/(a_step[i]*a_step[j])
+            pos[i] -= a_step[i]
 
         return 1/2 * (hessian + hessian.T)
 
@@ -390,19 +433,19 @@ def hessian_finite_difference(pos, function, eps=1e-3, method="central"):
         for i in range(k):
             for j in range(i+1):
                 pos = orig_pos.copy()
-                pos[i] += eps[i]
-                pos[j] += eps[j]
+                pos[i] += a_step[i]
+                pos[j] += a_step[j]
                 val1 = function(pos)
-                pos[j] -= 2*eps[j]
+                pos[j] -= 2*a_step[j]
                 val2 = function(pos)
                 pos = orig_pos.copy()
-                pos[i] -= eps[i]
-                pos[j] += eps[j]
+                pos[i] -= a_step[i]
+                pos[j] += a_step[j]
                 val3 = function(pos)
-                pos[j] -= 2*eps[j]
+                pos[j] -= 2*a_step[j]
                 val4 = function(pos)
-                hessian[i, j] = (val1 + val4 - val2 - val3) / (4*eps[i]*eps[j])
-                hessian[j, i] = (val1 + val4 - val2 - val3) / (4*eps[i]*eps[j])
+                hessian[i, j] = (val1 + val4 - val2 - val3) / (4*a_step[i]*a_step[j])
+                hessian[j, i] = (val1 + val4 - val2 - val3) / (4*a_step[i]*a_step[j])
 
         return hessian
 

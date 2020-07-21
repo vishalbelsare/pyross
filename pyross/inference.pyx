@@ -62,7 +62,7 @@ cdef class SIR_type:
         readonly np.ndarray alpha, fi, CM, dsigmadt, J, B, J_mat, B_vec, U
         readonly np.ndarray flat_indices1, flat_indices2, flat_indices, rows, cols
         readonly str det_method, lyapunov_method
-        readonly dict class_index_dict
+        readonly dict class_index_dict, det_kwargs
         readonly list param_keys
         readonly object contactMatrix
 
@@ -74,8 +74,9 @@ cdef class SIR_type:
         assert steps >= 2, 'Number of steps must be at least 2'
         self.steps = steps
         self.set_params(parameters)
-        self.det_method=det_method
-        self.lyapunov_method=lyapunov_method
+        self.det_method = det_method
+        self.lyapunov_method = lyapunov_method
+        self.det_kwargs = {}
 
         self.dim = nClass*M
         self.nClass = nClass
@@ -2271,7 +2272,7 @@ cdef class SIR_type:
             raise Exception('{} not implemented. Choose between LSODA, RK45, RK2 and euler'.format(lyapunov_method))
         self.lyapunov_method=lyapunov_method
 
-    def set_det_method(self, det_method):
+    def set_det_method(self, det_method, **kwargs):
         '''Sets the method used for deterministic integration for the SIR_type model
 
         Parameters
@@ -2282,6 +2283,7 @@ cdef class SIR_type:
         if det_method not in ['LSODA', 'RK45']:
             raise Exception('{} not implemented. Choose between LSODA and RK45'.format(det_method))
         self.det_method=det_method
+        self.det_kwargs = kwargs
 
     def set_det_model(self, parameters):
         '''
@@ -2648,7 +2650,7 @@ cdef class SIR_type:
         time_points = np.linspace(t1, t2, steps)
         res = solve_ivp(rhs0, [t1,t2], x0, method=self.det_method,
                         t_eval=time_points, dense_output=dense_output,
-                        max_step=maxNumSteps, rtol=1e-4)
+                        max_step=maxNumSteps, **self.det_kwargs)
         y = np.divide(res.y.T, self.Omega)
 
         if dense_output:
@@ -3699,16 +3701,13 @@ cdef class Spp(SIR_type):
 
         if use_gradient:
             f = self._latent_minus_logp_with_grad
-            self.lambdify_derivative_functions(keys, CM=False)
-            dp_diag = []
-            for r in param_guess_range:
-                if np.size(r) == 1:
-                    dp_diag.append(np.ones((1, self.M)))
-                else:
-                    dp_diag.append(np.identity(self.M))
-            dp = sparse.block_diag(dp_diag).todense()
             assert not init_flags[0] and init_flags[1], 'no gradient algorithm available'
-            dx0 = np.identity(self.dim)[init_fltrs[1], :]
+            dp = self._prepare_param_grad(keys, param_guess_range, CM_derivative=False)
+            function = lambda x: self._construct_inits(x, init_flags, init_fltrs,
+                                                       obs0, fltr[0])
+            shape = (len(init_guess), self.dim)
+            dx0 = pyross.utils.gradient_fd(init_guess, function, shape,
+                                         a_step=1/self.Omega, method='central')
             minimize_args['dp'] = dp
             minimize_args['dx0'] = dx0
         else:
@@ -3745,11 +3744,98 @@ cdef class Spp(SIR_type):
             'is_scale_parameter':is_scale_parameter, 'param_length':param_length,
             'scaled_param_guesses':scaled_param_guesses,
             'init_flags': init_flags, 'init_fltrs': init_fltrs,
-            's':s, 'scale': scale
+            's':s, 'scale': scale, 'dp':dp, 'dx0':dx0
         }
         return output_dict
 
+    def _eval_posterior(self, y, obs, fltr, Tf, contactMatrix, map_dict,
+                            tangent=False, use_gradient=False):
+        self.contactMatrix = contactMatrix
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
 
+        kwargs = {}
+        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
+                    'scaled_param_guesses', 'param_length', 'init_flags',
+                    'init_fltrs', 's', 'scale', ]:
+            kwargs[key] = map_dict[key]
+        if use_gradient:
+            kwargs['dp'] = map_dict['dp']
+            kwargs['dx0'] = map_dict['dx0']
+        f = np.empty(len(map_dict['flat_map']))
+        logpost = self._latent_minus_logp_with_grad(y, f, obs=obs, fltr=fltr,
+                                                Tf=Tf, obs0=obs0, tangent=tangent,
+                                            compute_grad=use_gradient, **kwargs)
+        if use_gradient:
+            return logpost, f
+        else:
+            return logpost
+
+
+    def compute_hessian_latent(self, obs, fltr, Tf, contactMatrix, map_dict,
+                               tangent=False, a_step=None, r_step=1e-1, use_gradient=False,
+                               fd_method="central"):
+        '''Computes the Hessian over the parameters and initial conditions.
+
+        Parameters
+        ----------
+        x: 2d numpy.array
+           Observed trajectory (number of data points x (age groups * model classes)).
+        Tf: float
+           Total time of the trajectory.
+        contactMatrix: callable
+           A function that takes time (t) as an argument and returns the contactMatrix.
+        map_dict: dict
+           Dictionary returned by `latent_infer_parameters`.
+        eps: float or numpy.array, optional
+           The step size of the Hessian calculation, default=1e-3.
+        fd_method: str, optional
+           The type of finite-difference scheme used to compute the hessian, supports "forward" and "central".
+
+        Returns
+        -------
+        hess: numpy.array
+            The Hessian over (flat) parameters and initial conditions.
+        '''
+        self.contactMatrix = contactMatrix
+        fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
+        flat_maps = map_dict['flat_map']
+
+        kwargs = {}
+        for key in ['param_keys', 'param_guess_range', 'is_scale_parameter',
+                    'scaled_param_guesses', 'param_length', 'init_flags',
+                    'init_fltrs', 's', 'scale', ]:
+            kwargs[key] = map_dict[key]
+        if use_gradient:
+            kwargs['dp'] = map_dict['dp']
+            kwargs['dx0'] = map_dict['dx0']
+            def dminuslogp(y):
+                f = np.empty(len(flat_maps))
+                _ = self._latent_minus_logp_with_grad(y, f, obs=obs, fltr=fltr,
+                            Tf=Tf, obs0=obs0, tangent=tangent, compute_grad=True, **kwargs)
+                return f
+            k = len(flat_maps)
+            hess = pyross.utils.gradient_fd(flat_maps, dminuslogp, (k, k),
+                                               a_step, r_step, method=fd_method)
+            hess = (hess + hess.T)/2
+        else:
+            def minuslogp(y):
+                return self._latent_minus_logp_with_grad(y, obs=obs, fltr=fltr,
+                                Tf=Tf, obs0=obs0, tangent=tangent, compute_grad=False, **kwargs)
+            hess = pyross.utils.hessian_finite_difference(flat_maps, minuslogp,
+                                               a_step, r_step, method=fd_method)
+        return hess
+
+    def _prepare_param_grad(self, param_list, param_guess_range,
+                                                        CM_derivative=False):
+        self.lambdify_derivative_functions(param_list, CM_derivative)
+        dp_diag = []
+        for r in param_guess_range:
+            if np.size(r) == 1:
+                dp_diag.append(np.ones((1, self.M)))
+            else:
+                dp_diag.append(np.identity(self.M))
+        dp = sparse.block_diag(dp_diag).todense()
+        return dp
 
     def _minuslogp_and_grad(self, x0, obs_flattened, fltr, Tf, dx0, dp):
         cdef:

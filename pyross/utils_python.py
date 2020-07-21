@@ -153,7 +153,7 @@ def minimization(objective_fct, guess, bounds, use_gradient=False, global_max_it
         dim = len(guess)
         if use_gradient:
             args_dict['compute_grad'] = True
-            local_opt = nlopt.opt(nlopt.LD_LBFGS, guess.shape[0])
+            local_opt = nlopt.opt(nlopt.LD_SLSQP, guess.shape[0])
         else:
             local_opt = nlopt.opt(nlopt.LN_BOBYQA, guess.shape[0])
         local_opt.set_min_objective(lambda x, grad: objective_fct(x, grad, **args_dict))
@@ -162,10 +162,10 @@ def minimization(objective_fct, guess, bounds, use_gradient=False, global_max_it
         local_opt.set_ftol_rel(ftol)
         local_opt.set_maxeval(3*local_max_iter)
 
-        if enable_global:
-            # CMA gives us the scaling of the varialbes close to the minimum
-            min_stds = global_opt.result.stds
-            local_opt.set_initial_step(1/2 * min_stds)
+        # if enable_global:
+        #     # CMA gives us the scaling of the varialbes close to the minimum
+        #     min_stds = global_opt.result.stds
+        #     local_opt.set_initial_step(1/2 * min_stds)
 
         x_result = local_opt.optimize(x_result)
         y_result = local_opt.last_optimum_value()
