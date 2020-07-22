@@ -3651,7 +3651,8 @@ cdef class Spp(SIR_type):
 
         if compute_grad:
             minus_logp, dminus_logp = self._minuslogp_and_grad(x0, obs, fltr[1:], Tf, dx0, dp)
-            dminus_logp -= pyross.utils.lognorm_dpdf(params, s, scale)
+            dminus_logp -= pyross.utils.lognorm_dpdf(params, s, scale) # add prior gradient
+            # ^can comment out this line if you only want to compute log likelihood
         else:
             minus_logp = self._obtain_logp_for_lat_traj(x0, obs, fltr[1:], Tf, tangent)
         minus_logp -= np.sum(lognorm.logpdf(params, s, scale=scale))
@@ -3700,14 +3701,17 @@ cdef class Spp(SIR_type):
                         's':s, 'scale':scale, 'tangent':tangent}
 
         if use_gradient:
-            f = self._latent_minus_logp_with_grad
             assert not init_flags[0] and init_flags[1], 'no gradient algorithm available'
+            assert tangent, 'no gradient algorithm available'
+            f = self._latent_minus_logp_with_grad
+
+            # construct dp, dx0, which are partial derivatives of the full x0, p wrt the ones inferred
             dp = self._prepare_param_grad(keys, param_guess_range, CM_derivative=False)
             function = lambda x: self._construct_inits(x, init_flags, init_fltrs,
                                                        obs0, fltr[0])
             shape = (len(init_guess), self.dim)
             dx0 = pyross.utils.gradient_fd(init_guess, function, shape,
-                                         a_step=1/self.Omega, method='central')
+                                         a_step=0.1/self.Omega, method='central')
             minimize_args['dp'] = dp
             minimize_args['dx0'] = dx0
         else:
@@ -3744,8 +3748,12 @@ cdef class Spp(SIR_type):
             'is_scale_parameter':is_scale_parameter, 'param_length':param_length,
             'scaled_param_guesses':scaled_param_guesses,
             'init_flags': init_flags, 'init_fltrs': init_fltrs,
-            's':s, 'scale': scale, 'dp':dp, 'dx0':dx0
+            's':s, 'scale': scale
         }
+        if use_gradient:
+            # if use gradient, then store dp and dx0 for future hessian computations etc
+            output_dict['dp'] = dp
+            output_dict['dx0'] = dx0
         return output_dict
 
     def _eval_posterior(self, y, obs, fltr, Tf, contactMatrix, map_dict,
