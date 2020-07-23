@@ -1,6 +1,7 @@
 *.pyc
 *.so
 *.ipynb_checkpoints
+*.bin
 *~
 *.swp
 *.mat
@@ -62,5 +63,5 @@ build/
 *-blx.aux
 *-blx.bib
 *.run.xml
-build/ 
+build/
 examples/control/ex7_SEkIkIkR_lockdown.pdf
