@@ -3647,7 +3647,9 @@ cdef class Spp(SIR_type):
             self.set_params(parameters)
             self.set_det_model(parameters)
             x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
-            return self._obtain_logp_for_lat_traj(x0, obs, fltr[1:], Tf, tangent)
+            minuslogp = self._obtain_logp_for_lat_traj(x0, obs, fltr[1:], Tf, tangent)
+            minuslogp -= np.sum(lognorm.logpdf(y, s, scale=scale))
+            return minuslogp
 
         minuslogp = minus_logp(params)
         k = len(params)
@@ -3749,7 +3751,7 @@ cdef class Spp(SIR_type):
             else:
                 f = self._latent_minus_logp_with_fd
                 xtol_abs = None
-                eps = 1e-4*guess
+                eps = 1e-5*guess
                 eps[param_length:] = 0.1/self.Omega
                 minimize_args['eps'] = eps
         else:
