@@ -19,7 +19,7 @@ except ImportError:
     nestle = None
 
 def minimization(objective_fct, guess, bounds, use_gradient=False, global_max_iter=100,
-                local_max_iter=100, ftol=1e-2, global_atol=1,
+                local_max_iter=100, ftol=1e-2, xtol_abs=None, global_atol=1,
                  enable_global=True, enable_local=True, cma_processes=0, cma_population=16, cma_stds=None,
                  cma_random_seed=None, verbose=True, args_dict={}):
     """ Compute the global minimum of the objective function.
@@ -155,17 +155,19 @@ def minimization(objective_fct, guess, bounds, use_gradient=False, global_max_it
             args_dict['compute_grad'] = True
             local_opt = nlopt.opt(nlopt.LD_SLSQP, guess.shape[0])
         else:
-            local_opt = nlopt.opt(nlopt.LN_BOBYQA, guess.shape[0])
+            local_opt = nlopt.opt(nlopt.LN_NELDERMEAD, guess.shape[0])
         local_opt.set_min_objective(lambda x, grad: objective_fct(x, grad, **args_dict))
         local_opt.set_lower_bounds(bounds[:,0])
         local_opt.set_upper_bounds(bounds[:,1])
         local_opt.set_ftol_rel(ftol)
+        if xtol_abs is not None:
+            local_opt.set_xtol_abs(xtol_abs)
         local_opt.set_maxeval(3*local_max_iter)
 
-        # if enable_global:
-        #     # CMA gives us the scaling of the varialbes close to the minimum
-        #     min_stds = global_opt.result.stds
-        #     local_opt.set_initial_step(1/2 * min_stds)
+        if enable_global:
+            # CMA gives us the scaling of the varialbes close to the minimum
+            min_stds = global_opt.result.stds
+            local_opt.set_initial_step(1/2 * min_stds)
 
         x_result = local_opt.optimize(x_result)
         y_result = local_opt.last_optimum_value()

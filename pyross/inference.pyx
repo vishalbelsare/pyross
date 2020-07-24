@@ -3628,6 +3628,35 @@ cdef class Spp(SIR_type):
                     B[product_index, m, reagent_index, m] += -rate[m]*reagent[m]
         self.B_vec = self.B.reshape((self.dim, self.dim))[(self.rows, self.cols)]
 
+    def _latent_minus_logp_with_fd(self, params, grad=None, compute_grad=False,
+                            param_keys=None,
+                            param_guess_range=None, is_scale_parameter=None,
+                            scaled_param_guesses=None, param_length=None,
+                            obs=None, fltr=None, Tf=None, obs0=None,
+                            init_flags=None, init_fltrs=None,
+                            s=None, scale=None, tangent=None, eps=None):
+
+        def minus_logp(y):
+            inits =  np.copy(y[param_length:])
+
+            # Restore parameters from flattened parameters
+            orig_params = pyross.utils.unflatten_parameters(y[:param_length],
+                              param_guess_range, is_scale_parameter, scaled_param_guesses)
+
+            parameters = self.fill_params_dict(param_keys, orig_params)
+            self.set_params(parameters)
+            self.set_det_model(parameters)
+            x0 = self._construct_inits(inits, init_flags, init_fltrs, obs0, fltr[0])
+            return self._obtain_logp_for_lat_traj(x0, obs, fltr[1:], Tf, tangent)
+
+        minuslogp = minus_logp(params)
+        k = len(params)
+        if compute_grad and np.size(grad) > 0:
+            y = np.copy(params)
+            grad[:] = pyross.utils.gradient_fd(y, minus_logp, (k, 1),
+                                               a_step=eps, method='central')[:, 0]
+        return minuslogp
+
     def _latent_minus_logp_with_grad(self, params, grad=None, compute_grad=False,
                             param_keys=None,
                             param_guess_range=None, is_scale_parameter=None,
@@ -3666,7 +3695,8 @@ cdef class Spp(SIR_type):
 
     def latent_infer_parameters(self, np.ndarray obs, np.ndarray fltr, double Tf,
                                 contactMatrix, param_priors, init_priors,
-                                tangent=False, verbose=False, use_gradient=False,
+                                tangent=False, verbose=False,
+                                use_gradient=False, fd_gradient=False,
                                 double ftol=1e-5,
                                 global_max_iter=100, local_max_iter=100, global_atol=1,
                                 enable_global=True, enable_local=True, cma_processes=0,
@@ -3701,23 +3731,33 @@ cdef class Spp(SIR_type):
                         's':s, 'scale':scale, 'tangent':tangent}
 
         if use_gradient:
-            assert not init_flags[0] and init_flags[1], 'no gradient algorithm available'
-            assert tangent, 'no gradient algorithm available'
-            f = self._latent_minus_logp_with_grad
+            if not fd_gradient:
+                assert not init_flags[0] and init_flags[1], 'no adj gradient algorithm available'
+                assert tangent, 'no gradient algorithm available'
+                f = self._latent_minus_logp_with_grad
 
-            # construct dp, dx0, which are partial derivatives of the full x0, p wrt the ones inferred
-            dp = self._prepare_param_grad(keys, param_guess_range, CM_derivative=False)
-            function = lambda x: self._construct_inits(x, init_flags, init_fltrs,
-                                                       obs0, fltr[0])
-            shape = (len(init_guess), self.dim)
-            dx0 = pyross.utils.gradient_fd(init_guess, function, shape,
-                                         a_step=0.1/self.Omega, method='central')
-            minimize_args['dp'] = dp
-            minimize_args['dx0'] = dx0
+                # construct dp, dx0, which are partial derivatives of the full x0, p wrt the ones inferred
+                dp = self._prepare_param_grad(keys, param_guess_range, CM_derivative=False)
+                function = lambda x: self._construct_inits(x, init_flags, init_fltrs,
+                                                           obs0, fltr[0])
+                shape = (len(init_guess), self.dim)
+                dx0 = pyross.utils.gradient_fd(init_guess, function, shape,
+                                             a_step=0.1/self.Omega, method='central')
+                minimize_args['dp'] = dp
+                minimize_args['dx0'] = dx0
+                xtol_abs = None
+            else:
+                f = self._latent_minus_logp_with_fd
+                xtol_abs = None
+                eps = 1e-4*guess
+                eps[param_length:] = 0.1/self.Omega
+                minimize_args['eps'] = eps
         else:
             f = self._latent_minus_logp
+            xtol_abs = 1e-3*guess
+            xtol_abs[param_length:] = 0.5/self.Omega
 
-        res = minimization(f, guess, bounds, ftol=ftol, global_max_iter=global_max_iter,
+        res = minimization(f, guess, bounds, ftol=ftol, xtol_abs=xtol_abs, global_max_iter=global_max_iter,
                            local_max_iter=local_max_iter, global_atol=global_atol,
                            enable_global=enable_global, enable_local=enable_local,
                            cma_processes=cma_processes, use_gradient=use_gradient,
@@ -3750,7 +3790,7 @@ cdef class Spp(SIR_type):
             'init_flags': init_flags, 'init_fltrs': init_fltrs,
             's':s, 'scale': scale
         }
-        if use_gradient:
+        if use_gradient and not fd_gradient:
             # if use gradient, then store dp and dx0 for future hessian computations etc
             output_dict['dp'] = dp
             output_dict['dx0'] = dx0
