@@ -147,7 +147,7 @@ def minimization(objective_fct, guess, bounds, use_gradient=False, global_max_it
         dim = len(guess)
         if use_gradient:
             args_dict['compute_grad'] = True
-            local_opt = nlopt.opt(nlopt.LD_SLSQP, guess.shape[0])
+            local_opt = nlopt.opt(nlopt.LD_MMA, guess.shape[0])
         else:
             local_opt = nlopt.opt(nlopt.LN_NELDERMEAD, guess.shape[0])
         local_opt.set_min_objective(lambda x, grad: objective_fct(x, grad, **args_dict))
