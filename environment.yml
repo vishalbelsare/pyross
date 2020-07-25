@@ -8,9 +8,6 @@ dependencies:
   - matplotlib
   - jupyter
   - scipy
-  - nlopt
-  - pathos
-  - pip
   - pytest 
   - pytest-cov
   - pandas
@@ -18,6 +15,10 @@ dependencies:
   - ipython
   - nbconvert
   - xlrd
+  - dynesty
+  - pip
   - pip:
     - cma
-    - git+https://github.com/kbarbary/nestle.git
+    - dill
+    - nlopt
+    - pathos
