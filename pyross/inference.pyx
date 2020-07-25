@@ -3839,6 +3839,7 @@ cdef class Spp(SIR_type):
                                 enable_global=True, enable_local=True, cma_processes=0,
                                 cma_population=16):
         self.contactMatrix = contactMatrix
+        self.rtol = ftol 
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
 
         # Read in parameter priors
