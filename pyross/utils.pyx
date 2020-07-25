@@ -209,7 +209,7 @@ cpdef RK2_integration(f, double [:] x, double t1, double t2, Py_ssize_t steps):
     return sol
 
 cpdef quadrature(func, double a, double b, fshape, tol=1.49e-8, rtol=1.49e-8,
-                 maxiter=64, miniter=2):
+                 maxiter=64, miniter=4):
     '''
     Similar to scipy's quadrature function but deals with vector functions
     '''

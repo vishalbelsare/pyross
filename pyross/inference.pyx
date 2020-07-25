@@ -57,12 +57,12 @@ cdef class SIR_type:
 
     cdef:
         readonly Py_ssize_t nClass, M, steps, dim, vec_size
-        readonly double Omega
+        readonly double Omega, rtol
         readonly np.ndarray beta, gIa, gIs, fsa
         readonly np.ndarray alpha, fi, CM, dsigmadt, J, B, J_mat, B_vec, U
         readonly np.ndarray flat_indices1, flat_indices2, flat_indices, rows, cols
         readonly str det_method, lyapunov_method
-        readonly dict class_index_dict, det_kwargs
+        readonly dict class_index_dict
         readonly list param_keys
         readonly object contactMatrix
 
@@ -76,7 +76,7 @@ cdef class SIR_type:
         self.set_params(parameters)
         self.det_method = det_method
         self.lyapunov_method = lyapunov_method
-        self.det_kwargs = {}
+        self.rtol = 1e-3 # same as the scipy default value
 
         self.dim = nClass*M
         self.nClass = nClass
@@ -1392,6 +1392,8 @@ cdef class SIR_type:
         """
 
         self.contactMatrix = contactMatrix
+        self.rtol = ftol
+
         fltr, obs, obs0 = pyross.utils.process_latent_data(fltr, obs)
 
         # Read in parameter priors
@@ -2404,7 +2406,7 @@ cdef class SIR_type:
             raise Exception('{} not implemented. Choose between LSODA, RK45, RK2 and euler'.format(lyapunov_method))
         self.lyapunov_method=lyapunov_method
 
-    def set_det_method(self, det_method, **kwargs):
+    def set_det_method(self, det_method):
         '''Sets the method used for deterministic integration for the SIR_type model
 
         Parameters
@@ -2415,7 +2417,6 @@ cdef class SIR_type:
         if det_method not in ['LSODA', 'RK45']:
             raise Exception('{} not implemented. Choose between LSODA and RK45'.format(det_method))
         self.det_method=det_method
-        self.det_kwargs = kwargs
 
     def set_det_model(self, parameters):
         '''
@@ -2782,7 +2783,7 @@ cdef class SIR_type:
         time_points = np.linspace(t1, t2, steps)
         res = solve_ivp(rhs0, [t1,t2], x0, method=self.det_method,
                         t_eval=time_points, dense_output=dense_output,
-                        max_step=maxNumSteps, **self.det_kwargs)
+                        max_step=maxNumSteps, rtol=self.rtol)
         y = np.divide(res.y.T, self.Omega)
 
         if dense_output:
@@ -4131,10 +4132,10 @@ cdef class Spp(SIR_type):
             return np.ravel(dUdt)
 
         U0 = np.identity((self.dim)).flatten()
-        res = solve_ivp(rhs, (t2, t1), U0, method=self.det_method, dense_output=True)
+        res = solve_ivp(rhs, (t2, t1), U0, method=self.det_method, rtol=self.rtol, dense_output=True)
         return res.sol
 
-    def dmudp(self, x_sol, Tf, Nf, dp, rtol=1e-4):
+    def dmudp(self, x_sol, Tf, Nf, dp):
         """
         calculates the derivatives of the mean traj x with respect to epi params and inits
         """
@@ -4166,7 +4167,7 @@ cdef class Spp(SIR_type):
             U_sol = self._obtain_full_backward_time_evol_op(x_sol, ti, tf)
             U = U_sol(ti).reshape((self.dim, self.dim))
             val = val@U
-            time_series[i] = np.add(val, pyross.utils.quadrature(integrand, ti, tf, fshape, rtol=rtol))
+            time_series[i] = np.add(val, pyross.utils.quadrature(integrand, ti, tf, fshape, rtol=self.rtol))
             val = time_series[i]
         return time_series
 
@@ -4182,10 +4183,10 @@ cdef class Spp(SIR_type):
 
         U0 = (dx0@np.identity((self.dim))).flatten()
         time_points = np.linspace(0, Tf, Nf)
-        dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, t_eval=time_points).y.T.reshape((Nf, xdim, dim))
+        dmudx0 = solve_ivp(rhs, [0, Tf], U0, method=self.det_method, rtol=self.rtol, t_eval=time_points).y.T.reshape((Nf, xdim, dim))
         return dmudx0
 
-    cpdef obtain_full_mean_cov_derivatives(self, x_sol, Tf, Nf, dx0, dp, rtol=1e-4):
+    cpdef obtain_full_mean_cov_derivatives(self, x_sol, Tf, Nf, dx0, dp):
         '''
         Calculates the derivative of the full_cov, only works for tangent space for now
         '''
@@ -4202,7 +4203,7 @@ cdef class Spp(SIR_type):
         cov = np.zeros((dim, dim), dtype=DTYPE)
         dcov = np.zeros((ntotal, dim, dim), dtype=DTYPE)
 
-        dxdp = self.dmudp(x_sol, Tf, Nf, dp, rtol=rtol)
+        dxdp = self.dmudp(x_sol, Tf, Nf, dp)
         dxdx0 = self.dmudx0(x_sol, Tf, Nf, dx0)
         time_points = np.linspace(0, Tf, Nf)
         dt = time_points[1]
