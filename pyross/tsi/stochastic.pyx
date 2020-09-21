@@ -51,8 +51,8 @@ class SIR:
         self.parameters = parameters
         self.beta   = self.parameters['beta']     # Infection rates 
         self.gI     = self.parameters['gI']       # Removal rates of I
-        self.KI     = self.parameters['KI']       # Number of stages (discretisation tsi)
-        self.nClass = self.KI + 1            # Total number of stages
+        self.kI     = self.parameters['kI']       # Number of stages (discretisation tsi)
+        self.nClass = self.kI + 1            # Total number of stages
 
         self.N     = np.sum(Ni)             # Population size
         self.M     = M                      # Number of age group
@@ -74,11 +74,11 @@ class SIR:
         mge: string
            Confirmation that beta and gI have the good shape
         """
-        if self.beta.shape != (self.M, self.KI):
-            raise Exception("beta should be an np.array(M, KI)")
-        elif self.gI.shape != (self.M, self.KI):
-            raise Exception("gI should be an np.array(M,KI)")
-        mge = "beta and gI have a shape (M={}, kI={})".format(self.M, self.KI)
+        if self.beta.shape != (self.M, self.kI):
+            raise Exception("beta should be an np.array(M, kI)")
+        elif self.gI.shape != (self.M, self.kI):
+            raise Exception("gI should be an np.array(M,kI)")
+        mge = "beta and gI have a shape (M={}, kI={})".format(self.M, self.kI)
         return mge
     
     def advection(self, x):
@@ -116,7 +116,7 @@ class SIR:
         for i in range(self.M):
             lbda_rate_i = 0
             for j in range(self.M):
-                infectiousness_j = np.sum( [ (self.beta[j,k]*I[j,k] + self.beta[j,k+1]*I[j,k+1])/(2*self.Ni[j]) for k in range(0, self.KI-1) ] )
+                infectiousness_j = np.sum( [ (self.beta[j,k]*I[j,k] + self.beta[j,k+1]*I[j,k+1])/(2*self.Ni[j]) for k in range(0, self.kI-1) ] )
                 lbda_rate_i += self.CM[i,j]*infectiousness_j
             lbda_rate[i] = lbda_rate_i
         return lbda_rate
@@ -152,11 +152,11 @@ class SIR:
         ### STEP 1: How many infected will recover ? ###
         # Compute the survival probability for each tsi
         # + Draw random numbers from binomial
-        psi_I= np.zeros((self.M, self.KI))
-        firings_IR = np.zeros((self.M, self.KI))
-        Ipredict = np.zeros((self.M, self.KI))
+        psi_I= np.zeros((self.M, self.kI))
+        firings_IR = np.zeros((self.M, self.kI))
+        Ipredict = np.zeros((self.M, self.kI))
         for i in range(self.M):
-            for k in range(self.KI):
+            for k in range(self.kI):
                 psi_I[i,k] = np.exp(-self.gI[i,k]*dt)
                 firings_IR[i,k] = np.random.binomial(I[i,k], 1-psi_I[i,k])
                 Ipredict[i,k] = I[i,k] - firings_IR[i,k]
